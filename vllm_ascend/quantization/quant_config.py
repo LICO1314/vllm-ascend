@@ -179,28 +179,34 @@ class AscendQuantConfig(QuantizationConfig):
         Map KV cache scale names from checkpoint to vLLM parameter names.
         
         For Qwen2/Qwen3 C8 quantization:
-        - k_proj.kv_cache_scale -> attn.key_antiquant_scale
+        - k_proj.kv_cache_scale / qkv_proj.kv_cache_scale -> skip (handled by stacked params)
         - v_proj.kv_cache_scale -> attn.value_antiquant_scale
-        - k_proj.kv_cache_offset -> attn.key_antiquant_offset
-        - v_proj.kv_cache_offset -> attn.value_antiquant_offset
+        - *_proj.kv_cache_offset -> skip (not used)
         
         :param name: parameter name from checkpoint
         :return: matching parameter name in vLLM model, or None if no match
         """
         # Check if this is a C8 KV cache quantization
-        if self.quant_description.get('kv_quant_type') == 'C8':
-            # Map k_proj.kv_cache_scale to attn.key_antiquant_scale
-            if name.endswith("k_proj.kv_cache_scale"):
-                return name.replace("k_proj.kv_cache_scale", "attn.key_antiquant_scale")
-            # Map v_proj.kv_cache_scale to attn.value_antiquant_scale
-            if name.endswith("v_proj.kv_cache_scale"):
-                return name.replace("v_proj.kv_cache_scale", "attn.value_antiquant_scale")
-            # Map k_proj.kv_cache_offset to attn.key_antiquant_offset (dummy parameter)
-            if name.endswith("k_proj.kv_cache_offset"):
-                return name.replace("k_proj.kv_cache_offset", "attn.key_antiquant_offset")
-            # Map v_proj.kv_cache_offset to attn.value_antiquant_offset (dummy parameter)
-            if name.endswith("v_proj.kv_cache_offset"):
-                return name.replace("v_proj.kv_cache_offset", "attn.value_antiquant_offset")
+        if self.quant_description.get('kv_quant_type') != 'C8':
+            return None
+        
+        # Skip all kv_cache_offset parameters (they are not used)
+        if ".kv_cache_offset" in name:
+            # Return empty string to skip without error
+            # Empty string is falsy so won't enter the loading branch
+            return None
+        
+        # For fused qkv_proj, the scales will be handled by the stacked params mapping
+        # So we don't map them here
+        if "qkv_proj.kv_cache_scale" in name:
+            return None
+            
+        # Map k_proj.kv_cache_scale to attn.key_antiquant_scale
+        if name.endswith("k_proj.kv_cache_scale"):
+            return name.replace("k_proj.kv_cache_scale", "attn.key_antiquant_scale")
+        # Map v_proj.kv_cache_scale to attn.value_antiquant_scale
+        if name.endswith("v_proj.kv_cache_scale"):
+            return name.replace("v_proj.kv_cache_scale", "attn.value_antiquant_scale")
         
         return None
 

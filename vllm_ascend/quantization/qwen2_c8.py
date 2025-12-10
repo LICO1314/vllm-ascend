@@ -90,16 +90,6 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
             param = torch.nn.Parameter(weight_param, requires_grad=False)
             set_weight_attrs(param, {"weight_loader": _make_kv_scale_weight_loader()})
             layer.register_parameter(weight_name, param)
-        
-        # Create dummy offset parameters to handle checkpoint compatibility
-        # These are not used but prevent loading errors if present in checkpoint
-        offset_dict = {}
-        offset_dict["key_antiquant_offset"] = torch.empty(1, dtype=torch.int8, requires_grad=False)
-        offset_dict["value_antiquant_offset"] = torch.empty(1, dtype=torch.int8, requires_grad=False)
-        
-        for offset_name, offset_param in offset_dict.items():
-            param = torch.nn.Parameter(offset_param, requires_grad=False)
-            layer.register_parameter(offset_name, param)
 
     def process_weights_after_loading(self, layer):
         """Process weights after loading from checkpoint."""

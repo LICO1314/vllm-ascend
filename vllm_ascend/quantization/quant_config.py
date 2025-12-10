@@ -122,7 +122,7 @@ class AscendQuantConfig(QuantizationConfig):
             return AscendKVCacheMethod(self, prefix)
         elif isinstance(layer, Attention) and self.quant_description.get(
                 'kv_quant_type') == 'C8':
-            if model_type in ['qwen2', 'qwen3']:
+            if model_type in ('qwen2', 'qwen3'):
                 from vllm_ascend.quantization.qwen2_c8 import \
                     Qwen2C8KVCacheMethod
                 return Qwen2C8KVCacheMethod(self, prefix)

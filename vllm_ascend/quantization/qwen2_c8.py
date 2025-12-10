@@ -52,6 +52,10 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
 
     def create_weights(self, layer) -> None:
         """Create KV cache quantization parameters for Qwen2/Qwen3 Attention layer."""
+        from vllm.distributed import (get_tensor_model_parallel_rank,
+                                      get_tensor_model_parallel_world_size)
+        from vllm.model_executor.utils import set_weight_attrs
+        
         param_dict = {}
         scale_dtype = self.params_dtype
 
@@ -64,9 +68,38 @@ class Qwen2C8KVCacheMethod(BaseKVCacheMethod):
                                                           dtype=scale_dtype,
                                                           requires_grad=False)
 
+        def _make_kv_scale_weight_loader():
+            """Create a custom weight loader that handles TP sharding for KV cache scales."""
+            def weight_loader(param, loaded_weight):
+                tp_size = get_tensor_model_parallel_world_size()
+                tp_rank = get_tensor_model_parallel_rank()
+                
+                if tp_size > 1:
+                    shard_size = loaded_weight.shape[0] // tp_size
+                    start_idx = tp_rank * shard_size
+                    end_idx = (tp_rank + 1) * shard_size
+                    loaded_weight = loaded_weight[start_idx:end_idx]
+                
+                if loaded_weight.dtype != param.dtype:
+                    loaded_weight = loaded_weight.to(param.dtype)
+                
+                param.data.copy_(loaded_weight)
+            return weight_loader
+
         for weight_name, weight_param in param_dict.items():
             param = torch.nn.Parameter(weight_param, requires_grad=False)
+            set_weight_attrs(param, {"weight_loader": _make_kv_scale_weight_loader()})
             layer.register_parameter(weight_name, param)
+        
+        # Create dummy offset parameters to handle checkpoint compatibility
+        # These are not used but prevent loading errors if present in checkpoint
+        offset_dict = {}
+        offset_dict["key_antiquant_offset"] = torch.empty(1, dtype=torch.int8, requires_grad=False)
+        offset_dict["value_antiquant_offset"] = torch.empty(1, dtype=torch.int8, requires_grad=False)
+        
+        for offset_name, offset_param in offset_dict.items():
+            param = torch.nn.Parameter(offset_param, requires_grad=False)
+            layer.register_parameter(offset_name, param)
 
     def process_weights_after_loading(self, layer):
         """Process weights after loading from checkpoint."""

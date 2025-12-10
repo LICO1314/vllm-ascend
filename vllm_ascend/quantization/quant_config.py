@@ -174,6 +174,36 @@ class AscendQuantConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return []
 
+    def get_cache_scale(self, name: str) -> Optional[str]:
+        """
+        Map KV cache scale names from checkpoint to vLLM parameter names.
+        
+        For Qwen2/Qwen3 C8 quantization:
+        - k_proj.kv_cache_scale -> attn.key_antiquant_scale
+        - v_proj.kv_cache_scale -> attn.value_antiquant_scale
+        - k_proj.kv_cache_offset -> attn.key_antiquant_offset
+        - v_proj.kv_cache_offset -> attn.value_antiquant_offset
+        
+        :param name: parameter name from checkpoint
+        :return: matching parameter name in vLLM model, or None if no match
+        """
+        # Check if this is a C8 KV cache quantization
+        if self.quant_description.get('kv_quant_type') == 'C8':
+            # Map k_proj.kv_cache_scale to attn.key_antiquant_scale
+            if name.endswith("k_proj.kv_cache_scale"):
+                return name.replace("k_proj.kv_cache_scale", "attn.key_antiquant_scale")
+            # Map v_proj.kv_cache_scale to attn.value_antiquant_scale
+            if name.endswith("v_proj.kv_cache_scale"):
+                return name.replace("v_proj.kv_cache_scale", "attn.value_antiquant_scale")
+            # Map k_proj.kv_cache_offset to attn.key_antiquant_offset (dummy parameter)
+            if name.endswith("k_proj.kv_cache_offset"):
+                return name.replace("k_proj.kv_cache_offset", "attn.key_antiquant_offset")
+            # Map v_proj.kv_cache_offset to attn.value_antiquant_offset (dummy parameter)
+            if name.endswith("v_proj.kv_cache_offset"):
+                return name.replace("v_proj.kv_cache_offset", "attn.value_antiquant_offset")
+        
+        return None
+
 
 packed_modules_model_mapping = {
     "qwen2": {

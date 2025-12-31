@@ -530,6 +530,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.kv_cache_spec.num_heads = 32
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
+    @patch('vllm_ascend.attention.attention_mask.get_pcp_group')
     @patch('vllm.distributed.parallel_state.get_pcp_group')
     @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
            return_value=1)
@@ -539,6 +540,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     def test_build_prefix_no_cache_metadata(self, mock_npu_available,
                                             mock_zeros, mock_dcp_world_size,
                                             mock_get_pcp_group,
+                                            mock_get_pcp_group_mask,
                                             mock_get_cos_and_sin_mla):
         mock_npu_available.return_value = False
         mock_dcp_world_size.return_value = 1
@@ -546,6 +548,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         pcp_group = MagicMock(spec=GroupCoordinator)
         pcp_group.world_size = 1
         mock_get_pcp_group.return_value = pcp_group
+        mock_get_pcp_group_mask.return_value = pcp_group
 
         def zeros_override(*args, **kwargs):
             kwargs.pop('pin_memory', None)
@@ -594,6 +597,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
+    @patch('vllm_ascend.attention.attention_mask.get_pcp_group')
     @patch('vllm.distributed.parallel_state.get_pcp_group')
     @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
            return_value=1)
@@ -603,6 +607,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     def test_build_chunked_prefix_metadata(self, mock_npu_available,
                                            mock_zeros, mock_dcp_world_size,
                                            mock_get_pcp_group,
+                                           mock_get_pcp_group_mask,
                                            mock_get_cos_and_sin_mla):
         mock_npu_available.return_value = False
         mock_dcp_world_size.return_value = 1
@@ -610,6 +615,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         pcp_group = MagicMock(spec=GroupCoordinator)
         pcp_group.world_size = 1
         mock_get_pcp_group.return_value = pcp_group
+        mock_get_pcp_group_mask.return_value = pcp_group
 
         def zeros_override(*args, **kwargs):
             kwargs.pop('pin_memory', None)
@@ -659,11 +665,13 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
+    @patch('vllm_ascend.attention.attention_mask.get_pcp_group')
     @patch('vllm.distributed.parallel_state.get_pcp_group')
     @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
            return_value=1)
     def test_build_decode_only_metadata(self, mock_dcp_world_size,
                                         mock_get_pcp_group,
+                                        mock_get_pcp_group_mask,
                                         mock_get_cos_and_sin_mla):
         mock_dcp_world_size.return_value = 1
         torch.Tensor.pin_memory = lambda x: x  # noqa
@@ -671,6 +679,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         pcp_group = MagicMock(spec=GroupCoordinator)
         pcp_group.world_size = 1
         mock_get_pcp_group.return_value = pcp_group
+        mock_get_pcp_group_mask.return_value = pcp_group
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 1, 2, 3]),
             query_start_loc_cpu=torch.tensor([0, 1, 2, 3]),
@@ -712,11 +721,13 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
+    @patch('vllm_ascend.attention.attention_mask.get_pcp_group')
     @patch('vllm.distributed.parallel_state.get_pcp_group')
     @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
            return_value=1)
     def test_build_for_graph_capture_decode_only(self, mock_dcp_world_size,
                                                  mock_get_pcp_group,
+                                                 mock_get_pcp_group_mask,
                                                  mock_get_cos_and_sin_mla):
         mock_dcp_world_size.return_value = 1
         torch.Tensor.pin_memory = lambda x: x  # noqa
@@ -724,6 +735,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         pcp_group = MagicMock(spec=GroupCoordinator)
         pcp_group.world_size = 1
         mock_get_pcp_group.return_value = pcp_group
+        mock_get_pcp_group_mask.return_value = pcp_group
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 1, 2, 3]),
             query_start_loc_cpu=torch.tensor([0, 1, 2, 3]),

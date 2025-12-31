@@ -120,8 +120,10 @@ class AscendAttentionCPMetadataBuilder(AscendAttentionMetadataBuilder):
 
         slot_mapping = common_attn_metadata.slot_mapping[:
                                                          num_actual_tokens_pcp_padded]
-        attn_mask = common_attn_metadata.attn_mask
         attn_state = common_attn_metadata.attn_state
+
+        attn_mask = self.attn_mask_builder.get_attention_mask(
+            self.model_config)
         num_computed_tokens_cpu = (seq_lens - query_lens)
 
         query_start_loc = query_start_loc_cpu.to(self.device,

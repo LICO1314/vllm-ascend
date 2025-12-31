@@ -70,7 +70,7 @@ def test_generate_pcp_metadata_basic(pcp_size, dcp_size, num_reqs, query_lens,
     input_batch.num_tokens = torch.tensor(num_tokens)
 
     query_lens = torch.tensor(query_lens)
-    result = pcp_manager.generate_pcp_metadata(total_tokens, query_lens, None,
+    result = pcp_manager.generate_pcp_metadata(total_tokens, query_lens,
                                                input_batch)
 
     if not expect_not_none:

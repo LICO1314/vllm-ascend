@@ -59,9 +59,12 @@ class AscendQuantConfig(QuantizationConfig):
     def __init__(self, quant_config: Dict[str, Any]):
         super().__init__()
         self.quant_description = quant_config
+        # Extract kv_quant_type if present (for C8 models from modelslim)
+        self.kv_quant_type = quant_config.get('kv_quant_type', None)
         # TODO(whx): remove this adaptation after adding "shared_head"
         # to prefix of DeepSeekShareHead in vLLM.
         extra_quant_dict = {}
+        keys_to_remove = []
         for k in self.quant_description.keys():
             if "shared_head" in k:
                 new_k = k.replace(".shared_head.", ".")
@@ -69,6 +72,21 @@ class AscendQuantConfig(QuantizationConfig):
             if "weight_packed" in k:
                 new_k = k.replace("weight_packed", "weight")
                 extra_quant_dict[new_k] = self.quant_description[k]
+            # Remove kv_cache_offset entries (not used in vllm-ascend C8 implementation)
+            if "kv_cache_offset" in k:
+                keys_to_remove.append(k)
+            # Map C8 KV cache scale to vllm-ascend parameter names
+            # k_proj.kv_cache_scale -> attn.key_antiquant_scale
+            # v_proj.kv_cache_scale -> attn.value_antiquant_scale
+            if "k_proj.kv_cache_scale" in k:
+                new_k = k.replace("self_attn.k_proj.kv_cache_scale", "self_attn.attn.key_antiquant_scale")
+                extra_quant_dict[new_k] = self.quant_description[k]
+            if "v_proj.kv_cache_scale" in k:
+                new_k = k.replace("self_attn.v_proj.kv_cache_scale", "self_attn.attn.value_antiquant_scale")
+                extra_quant_dict[new_k] = self.quant_description[k]
+        # Remove kv_cache_offset keys
+        for k in keys_to_remove:
+            del self.quant_description[k]
         self.quant_description.update(extra_quant_dict)
 
     def __repr__(self) -> str:
@@ -130,10 +148,15 @@ class AscendQuantConfig(QuantizationConfig):
                 return AscendUnquantizedLinearMethod()
             return AscendLinearMethod(self, prefix,
                                       self.packed_modules_mapping, layer)
-        elif isinstance(layer, Attention) and \
-            'fa_quant_type' in self.quant_description.keys() and \
-            self.quant_description['fa_quant_type'] is not None:
-            return AscendKVCacheMethod(self, prefix)
+        elif isinstance(layer, Attention):
+            # Check for KV cache quantization
+            # Priority 1: kv_quant_type (for modelslim C8 models)
+            if self.kv_quant_type is not None and self.kv_quant_type == 'C8':
+                return AscendKVCacheMethod(self, prefix)
+            # Priority 2: fa_quant_type in quant_description
+            elif 'fa_quant_type' in self.quant_description.keys() and \
+                self.quant_description['fa_quant_type'] is not None:
+                return AscendKVCacheMethod(self, prefix)
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):

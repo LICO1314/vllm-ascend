@@ -98,9 +98,18 @@ def get_quant_method_modelslim(
     logger.info_once("Using the vLLM Ascend modelslim Quantization now!")
     if packed_modules_mapping is None:
         packed_modules_mapping = dict()
-    # Attention
-    if '.attn' in prefix and 'fa_quant_type' in quant_description.keys():
-        quant_type = quant_description['fa_quant_type']
+    # Attention - check for KV cache quantization
+    if '.attn' in prefix:
+        # Priority 1: Check kv_quant_type for C8 models
+        kv_quant_type = quant_description.get('kv_quant_type', None)
+        if kv_quant_type == 'C8':
+            quant_type = 'W8A8C8'
+        # Priority 2: Check fa_quant_type
+        elif 'fa_quant_type' in quant_description.keys():
+            quant_type = quant_description['fa_quant_type']
+        else:
+            # No KV cache quantization
+            return None
     # Linear
     else:
         quant_type = get_linear_quant_type(quant_description, prefix,

@@ -71,23 +71,48 @@ class AscendQuantConfig(QuantizationConfig):
             if "weight_packed" in k:
                 new_k = k.replace("weight_packed", "weight")
                 extra_quant_dict[new_k] = self.quant_description[k]
-            # Map C8 KV cache parameters to vllm-ascend parameter names
-            # k_proj.kv_cache_scale -> attn.key_antiquant_scale
-            # v_proj.kv_cache_scale -> attn.value_antiquant_scale
-            # k_proj.kv_cache_offset -> attn.key_antiquant_offset (dummy, not used)
-            # v_proj.kv_cache_offset -> attn.value_antiquant_offset (dummy, not used)
+            
+            # Map C8 KV cache parameters for qkv fusion models
+            # In Qwen2/Qwen3, k_proj/v_proj are fused into qkv_proj during model loading
+            # We need to create entries for both patterns:
+            # 1. Original: k_proj.kv_cache_scale/offset
+            # 2. Fused: qkv_proj.kv_cache_scale/offset -> attn.key/value_antiquant_scale/offset
+            
             if "k_proj.kv_cache_scale" in k:
-                new_k = k.replace("self_attn.k_proj.kv_cache_scale", "self_attn.attn.key_antiquant_scale")
-                extra_quant_dict[new_k] = self.quant_description[k]
+                # Map k_proj -> qkv_proj (for fusion)
+                qkv_key = k.replace(".k_proj.", ".qkv_proj.")
+                extra_quant_dict[qkv_key] = self.quant_description[k]
+                # Map qkv_proj -> attn parameter
+                attn_key = k.replace("self_attn.k_proj.kv_cache_scale", "self_attn.attn.key_antiquant_scale")
+                extra_quant_dict[attn_key] = self.quant_description[k]
+                # Also map the fused qkv_proj to attn parameter
+                attn_key_from_qkv = qkv_key.replace("self_attn.qkv_proj.kv_cache_scale", "self_attn.attn.key_antiquant_scale")
+                extra_quant_dict[attn_key_from_qkv] = self.quant_description[k]
+                
             if "v_proj.kv_cache_scale" in k:
-                new_k = k.replace("self_attn.v_proj.kv_cache_scale", "self_attn.attn.value_antiquant_scale")
-                extra_quant_dict[new_k] = self.quant_description[k]
+                qkv_key = k.replace(".v_proj.", ".qkv_proj.")
+                extra_quant_dict[qkv_key] = self.quant_description[k]
+                attn_key = k.replace("self_attn.v_proj.kv_cache_scale", "self_attn.attn.value_antiquant_scale")
+                extra_quant_dict[attn_key] = self.quant_description[k]
+                attn_key_from_qkv = qkv_key.replace("self_attn.qkv_proj.kv_cache_scale", "self_attn.attn.value_antiquant_scale")
+                extra_quant_dict[attn_key_from_qkv] = self.quant_description[k]
+                
             if "k_proj.kv_cache_offset" in k:
-                new_k = k.replace("self_attn.k_proj.kv_cache_offset", "self_attn.attn.key_antiquant_offset")
-                extra_quant_dict[new_k] = self.quant_description[k]
+                qkv_key = k.replace(".k_proj.", ".qkv_proj.")
+                extra_quant_dict[qkv_key] = self.quant_description[k]
+                attn_key = k.replace("self_attn.k_proj.kv_cache_offset", "self_attn.attn.key_antiquant_offset")
+                extra_quant_dict[attn_key] = self.quant_description[k]
+                attn_key_from_qkv = qkv_key.replace("self_attn.qkv_proj.kv_cache_offset", "self_attn.attn.key_antiquant_offset")
+                extra_quant_dict[attn_key_from_qkv] = self.quant_description[k]
+                
             if "v_proj.kv_cache_offset" in k:
-                new_k = k.replace("self_attn.v_proj.kv_cache_offset", "self_attn.attn.value_antiquant_offset")
-                extra_quant_dict[new_k] = self.quant_description[k]
+                qkv_key = k.replace(".v_proj.", ".qkv_proj.")
+                extra_quant_dict[qkv_key] = self.quant_description[k]
+                attn_key = k.replace("self_attn.v_proj.kv_cache_offset", "self_attn.attn.value_antiquant_offset")
+                extra_quant_dict[attn_key] = self.quant_description[k]
+                attn_key_from_qkv = qkv_key.replace("self_attn.qkv_proj.kv_cache_offset", "self_attn.attn.value_antiquant_offset")
+                extra_quant_dict[attn_key_from_qkv] = self.quant_description[k]
+                
         self.quant_description.update(extra_quant_dict)
 
     def __repr__(self) -> str:

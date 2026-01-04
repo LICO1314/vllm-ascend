@@ -451,8 +451,10 @@ class AscendLinearMethod(LinearMethodBase):
             layer.register_parameter("kv_cache_offset", kv_cache_offset_param)
             
             # Set a dummy weight loader that just resizes and loads
+            # Need to accept shard_id parameter for fused layers
             def dummy_offset_loader(param: torch.nn.Parameter,
-                                   loaded_weight: torch.Tensor) -> None:
+                                   loaded_weight: torch.Tensor,
+                                   shard_id: str = None) -> None:
                 if param.data.numel() == 1 and loaded_weight.numel() > 1:
                     param.data = torch.empty_like(loaded_weight)
                 if loaded_weight.dtype != param.dtype:

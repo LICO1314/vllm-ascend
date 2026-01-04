@@ -64,7 +64,6 @@ class AscendQuantConfig(QuantizationConfig):
         # TODO(whx): remove this adaptation after adding "shared_head"
         # to prefix of DeepSeekShareHead in vLLM.
         extra_quant_dict = {}
-        keys_to_remove = []
         for k in self.quant_description.keys():
             if "shared_head" in k:
                 new_k = k.replace(".shared_head.", ".")
@@ -72,21 +71,23 @@ class AscendQuantConfig(QuantizationConfig):
             if "weight_packed" in k:
                 new_k = k.replace("weight_packed", "weight")
                 extra_quant_dict[new_k] = self.quant_description[k]
-            # Remove kv_cache_offset entries (not used in vllm-ascend C8 implementation)
-            if "kv_cache_offset" in k:
-                keys_to_remove.append(k)
-            # Map C8 KV cache scale to vllm-ascend parameter names
+            # Map C8 KV cache parameters to vllm-ascend parameter names
             # k_proj.kv_cache_scale -> attn.key_antiquant_scale
             # v_proj.kv_cache_scale -> attn.value_antiquant_scale
+            # k_proj.kv_cache_offset -> attn.key_antiquant_offset (dummy, not used)
+            # v_proj.kv_cache_offset -> attn.value_antiquant_offset (dummy, not used)
             if "k_proj.kv_cache_scale" in k:
                 new_k = k.replace("self_attn.k_proj.kv_cache_scale", "self_attn.attn.key_antiquant_scale")
                 extra_quant_dict[new_k] = self.quant_description[k]
             if "v_proj.kv_cache_scale" in k:
                 new_k = k.replace("self_attn.v_proj.kv_cache_scale", "self_attn.attn.value_antiquant_scale")
                 extra_quant_dict[new_k] = self.quant_description[k]
-        # Remove kv_cache_offset keys
-        for k in keys_to_remove:
-            del self.quant_description[k]
+            if "k_proj.kv_cache_offset" in k:
+                new_k = k.replace("self_attn.k_proj.kv_cache_offset", "self_attn.attn.key_antiquant_offset")
+                extra_quant_dict[new_k] = self.quant_description[k]
+            if "v_proj.kv_cache_offset" in k:
+                new_k = k.replace("self_attn.v_proj.kv_cache_offset", "self_attn.attn.value_antiquant_offset")
+                extra_quant_dict[new_k] = self.quant_description[k]
         self.quant_description.update(extra_quant_dict)
 
     def __repr__(self) -> str:

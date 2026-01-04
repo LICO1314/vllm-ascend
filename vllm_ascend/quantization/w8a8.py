@@ -212,6 +212,9 @@ class AscendW8A8C8KVCacheMethod:
         
         Note: At this point, layer doesn't have num_heads/head_size attributes yet.
         We create placeholder parameters that will be resized in process_weights_after_loading.
+        
+        We also create dummy kv_cache_offset parameters to prevent KeyError during weight
+        loading, even though these parameters are not used in vllm-ascend's C8 implementation.
         """
         from vllm.model_executor.utils import set_weight_attrs
         
@@ -221,13 +224,24 @@ class AscendW8A8C8KVCacheMethod:
         # Use size=1 as placeholder since we don't know the actual size yet
         key_scale = torch.empty(1, dtype=scale_dtype, requires_grad=False)
         value_scale = torch.empty(1, dtype=scale_dtype, requires_grad=False)
+        
+        # Create dummy offset parameters (not used, just to prevent KeyError)
+        key_offset = torch.empty(1, dtype=torch.int8, requires_grad=False)
+        value_offset = torch.empty(1, dtype=torch.int8, requires_grad=False)
 
-        # Register parameters
+        # Register scale parameters
         key_param = torch.nn.Parameter(key_scale, requires_grad=False)
         value_param = torch.nn.Parameter(value_scale, requires_grad=False)
         
         layer.register_parameter("key_antiquant_scale", key_param)
         layer.register_parameter("value_antiquant_scale", value_param)
+        
+        # Register dummy offset parameters
+        key_offset_param = torch.nn.Parameter(key_offset, requires_grad=False)
+        value_offset_param = torch.nn.Parameter(value_offset, requires_grad=False)
+        
+        layer.register_parameter("key_antiquant_offset", key_offset_param)
+        layer.register_parameter("value_antiquant_offset", value_offset_param)
         
         # Set custom weight loaders that handle TP sharding and dtype conversion
         def key_weight_loader(param: torch.nn.Parameter, 
@@ -240,11 +254,22 @@ class AscendW8A8C8KVCacheMethod:
                                *args, **kwargs) -> None:
             self._load_kv_cache_scale(param, loaded_weight)
         
+        # Dummy weight loader for offset (just load but don't use)
+        def dummy_offset_loader(param: torch.nn.Parameter,
+                               loaded_weight: torch.Tensor,
+                               *args, **kwargs) -> None:
+            # Just resize and load to prevent errors, but we don't use these values
+            if param.data.numel() == 1 and loaded_weight.numel() > 1:
+                param.data = torch.empty_like(loaded_weight)
+            if loaded_weight.dtype != param.dtype:
+                loaded_weight = loaded_weight.to(param.dtype)
+            param.data.copy_(loaded_weight)
+        
         # Mark parameters with custom weight loaders
-        # The actual weight name mapping (k_proj.kv_cache_scale -> key_antiquant_scale)
-        # should be handled by the model's load_weights method or vllm's standard remapping
         set_weight_attrs(key_param, {"weight_loader": key_weight_loader})
         set_weight_attrs(value_param, {"weight_loader": value_weight_loader})
+        set_weight_attrs(key_offset_param, {"weight_loader": dummy_offset_loader})
+        set_weight_attrs(value_offset_param, {"weight_loader": dummy_offset_loader})
 
     def _load_kv_cache_scale(
         self,

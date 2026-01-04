@@ -367,6 +367,8 @@ class AscendLinearMethod(LinearMethodBase):
                                              "linear",
                                              packed_modules_mapping,
                                              layer=layer)
+        self.quant_config = quant_config
+        self.prefix = prefix
 
     def create_weights(
         self,
@@ -439,6 +441,25 @@ class AscendLinearMethod(LinearMethodBase):
             if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name:
                 setattr(param, "input_dim", 1)
                 param.input_dim = 1
+        
+        # Special handling for C8 KV cache: create dummy kv_cache_offset parameters
+        # for qkv_proj layer to prevent KeyError during weight loading
+        if "qkv_proj" in self.prefix and self.quant_config.kv_quant_type == 'C8':
+            # Create dummy kv_cache_offset parameter (will be loaded but not used)
+            kv_cache_offset = torch.empty(1, dtype=torch.int8, requires_grad=False)
+            kv_cache_offset_param = torch.nn.Parameter(kv_cache_offset, requires_grad=False)
+            layer.register_parameter("kv_cache_offset", kv_cache_offset_param)
+            
+            # Set a dummy weight loader that just resizes and loads
+            def dummy_offset_loader(param: torch.nn.Parameter,
+                                   loaded_weight: torch.Tensor) -> None:
+                if param.data.numel() == 1 and loaded_weight.numel() > 1:
+                    param.data = torch.empty_like(loaded_weight)
+                if loaded_weight.dtype != param.dtype:
+                    loaded_weight = loaded_weight.to(param.dtype)
+                param.data.copy_(loaded_weight)
+            
+            set_weight_attrs(kv_cache_offset_param, {"weight_loader": dummy_offset_loader})
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):

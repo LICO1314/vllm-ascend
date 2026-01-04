@@ -210,21 +210,17 @@ class AscendW8A8C8KVCacheMethod:
     def create_weights(self, layer) -> None:
         """Create KV cache quantization parameters for Attention layer.
         
-        For Qwen2/Qwen3 models with qkv_proj fusion, the KV cache scales in checkpoint
-        are named as k_proj.kv_cache_scale and v_proj.kv_cache_scale, which need to be
-        mapped to key_antiquant_scale and value_antiquant_scale in the model.
+        Note: At this point, layer doesn't have num_heads/head_size attributes yet.
+        We create placeholder parameters that will be resized in process_weights_after_loading.
         """
         from vllm.model_executor.utils import set_weight_attrs
         
         scale_dtype = self.params_dtype
 
-        # Create parameters for key and value antiquant scales
-        key_scale = torch.empty(layer.num_kv_heads * layer.head_size,
-                               dtype=scale_dtype,
-                               requires_grad=False)
-        value_scale = torch.empty(layer.num_kv_heads * layer.head_size,
-                                 dtype=scale_dtype,
-                                 requires_grad=False)
+        # Create placeholder parameters (will be resized later)
+        # Use size=1 as placeholder since we don't know the actual size yet
+        key_scale = torch.empty(1, dtype=scale_dtype, requires_grad=False)
+        value_scale = torch.empty(1, dtype=scale_dtype, requires_grad=False)
 
         # Register parameters
         key_param = torch.nn.Parameter(key_scale, requires_grad=False)
@@ -260,6 +256,8 @@ class AscendW8A8C8KVCacheMethod:
         This method handles the mapping from checkpoint weights:
         - k_proj.kv_cache_scale -> key_antiquant_scale
         - v_proj.kv_cache_scale -> value_antiquant_scale
+        
+        It also resizes the parameter if needed (from placeholder size 1).
         """
         from vllm.distributed import (get_tensor_model_parallel_rank,
                                       get_tensor_model_parallel_world_size)
@@ -278,6 +276,10 @@ class AscendW8A8C8KVCacheMethod:
         if loaded_weight.dtype != param.dtype:
             loaded_weight = loaded_weight.to(param.dtype)
 
+        # Resize parameter if it's still a placeholder (size=1)
+        if param.data.numel() == 1 and loaded_weight.numel() > 1:
+            param.data = torch.empty_like(loaded_weight)
+        
         param.data.copy_(loaded_weight)
 
     def process_weights_after_loading(self, layer):

@@ -442,25 +442,42 @@ class AscendLinearMethod(LinearMethodBase):
                 setattr(param, "input_dim", 1)
                 param.input_dim = 1
         
-        # Special handling for C8 KV cache: create dummy kv_cache_offset parameters
-        # for qkv_proj layer to prevent KeyError during weight loading
+        # Special handling for C8 KV cache: create dummy kv_cache_scale and kv_cache_offset 
+        # parameters for qkv_proj layer to prevent KeyError during weight loading.
+        # These parameters will forward the loaded weights to attention layer's parameters.
         if "qkv_proj" in self.prefix and self.quant_config.kv_quant_type == 'C8':
+            # Create dummy kv_cache_scale parameter (will forward to attn.key/value_antiquant_scale)
+            kv_cache_scale = torch.empty(1, dtype=params_dtype, requires_grad=False)
+            kv_cache_scale_param = torch.nn.Parameter(kv_cache_scale, requires_grad=False)
+            layer.register_parameter("kv_cache_scale", kv_cache_scale_param)
+            
             # Create dummy kv_cache_offset parameter (will be loaded but not used)
             kv_cache_offset = torch.empty(1, dtype=torch.int8, requires_grad=False)
             kv_cache_offset_param = torch.nn.Parameter(kv_cache_offset, requires_grad=False)
             layer.register_parameter("kv_cache_offset", kv_cache_offset_param)
             
-            # Set a dummy weight loader that just resizes and loads
-            # Need to accept shard_id parameter for fused layers
-            def dummy_offset_loader(param: torch.nn.Parameter,
-                                   loaded_weight: torch.Tensor,
-                                   shard_id: str = None) -> None:
+            # Dummy weight loaders that just resize and load (actual C8 logic uses attn layer params)
+            def dummy_scale_loader(param: torch.nn.Parameter,
+                                  loaded_weight: torch.Tensor,
+                                  shard_id: str = None) -> None:
+                # Just load to prevent errors, the actual scale is in attn layer
                 if param.data.numel() == 1 and loaded_weight.numel() > 1:
                     param.data = torch.empty_like(loaded_weight)
                 if loaded_weight.dtype != param.dtype:
                     loaded_weight = loaded_weight.to(param.dtype)
                 param.data.copy_(loaded_weight)
             
+            def dummy_offset_loader(param: torch.nn.Parameter,
+                                   loaded_weight: torch.Tensor,
+                                   shard_id: str = None) -> None:
+                # Just load to prevent errors, C8 doesn't use offset (symmetric quantization)
+                if param.data.numel() == 1 and loaded_weight.numel() > 1:
+                    param.data = torch.empty_like(loaded_weight)
+                if loaded_weight.dtype != param.dtype:
+                    loaded_weight = loaded_weight.to(param.dtype)
+                param.data.copy_(loaded_weight)
+            
+            set_weight_attrs(kv_cache_scale_param, {"weight_loader": dummy_scale_loader})
             set_weight_attrs(kv_cache_offset_param, {"weight_loader": dummy_offset_loader})
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

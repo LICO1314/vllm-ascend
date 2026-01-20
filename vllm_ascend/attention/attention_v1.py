@@ -387,6 +387,119 @@ class AscendAttentionBackendImpl(AttentionImpl):
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
 
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        speculative_config=None,
+        num_dcp_pcp_tokens=None,
+    ):
+        if using_paged_attention(num_tokens, vllm_config):
+            # Paged Attention update logic
+            if forward_context.is_draft_model:
+                graph_params = get_draft_graph_params()
+            else:
+                graph_params = get_graph_params()
+            with torch.npu.stream(update_stream):
+                for key, param, handle, event in zip(
+                    forward_context.attn_metadata,
+                    graph_params.attn_params[num_tokens],
+                    graph_params.handles[num_tokens],
+                    graph_params.events[num_tokens],
+                ):
+                    (
+                        query,
+                        key_cache,
+                        value_cache,
+                        num_kv_heads,
+                        num_heads,
+                        scale,
+                        block_table,
+                        seq_lens,
+                        output,
+                    ) = param
+                    seq_lens = forward_context.attn_metadata[key].seq_lens
+
+                    workspace = torch_npu._npu_paged_attention_get_workspace(
+                        query=query,
+                        key_cache=key_cache,
+                        value_cache=value_cache,
+                        num_kv_heads=num_kv_heads,
+                        num_heads=num_heads,
+                        scale_value=scale,
+                        block_table=block_table,
+                        context_lens=seq_lens,
+                        out=output,
+                    )
+                    torch.npu.graph_task_update_begin(update_stream, handle)
+                    torch_npu._npu_paged_attention(
+                        query=query,
+                        key_cache=key_cache,
+                        value_cache=value_cache,
+                        num_kv_heads=num_kv_heads,
+                        num_heads=num_heads,
+                        scale_value=scale,
+                        block_table=block_table,
+                        context_lens=seq_lens,
+                        out=output,
+                        workspace=workspace,
+                    )
+                    torch.npu.graph_task_update_end(update_stream)
+                    event.record(update_stream)
+        else:
+            # FIA update logic
+            if forward_context.is_draft_model:
+                graph_params = get_draft_graph_params()
+            else:
+                graph_params = get_graph_params()
+            with torch.npu.stream(update_stream):
+                for key, param, handle, event in zip(
+                    forward_context.attn_metadata,
+                    graph_params.attn_params[num_tokens],
+                    graph_params.handles[num_tokens],
+                    graph_params.events[num_tokens],
+                ):
+                    (
+                        query,
+                        key_cache,
+                        value,
+                        block_tables,
+                        attn_mask,
+                        block_size,
+                        seq_lens,
+                        query_start_loc,
+                        num_kv_heads,
+                        num_heads,
+                        scale,
+                        attn_output,
+                        softmax_lse,
+                    ) = param
+
+                    seq_lens = forward_context.attn_metadata[key].seq_lens_list
+                    actual_seq_lengths_q = forward_context.attn_metadata[key].actual_seq_lengths_q
+                    torch.npu.graph_task_update_begin(update_stream, handle)
+                    torch_npu.npu_fused_infer_attention_score.out(
+                        query=query,
+                        key=key_cache,
+                        value=value,
+                        block_table=block_tables,
+                        atten_mask=attn_mask,
+                        input_layout="TND",
+                        block_size=block_size,
+                        actual_seq_lengths=actual_seq_lengths_q,
+                        actual_seq_lengths_kv=seq_lens,
+                        num_key_value_heads=num_kv_heads,
+                        num_heads=num_heads,
+                        scale=scale,
+                        sparse_mode=3,
+                        workspace=graph_params.workspaces.get(num_tokens),
+                        out=[attn_output, softmax_lse],
+                    )
+                    torch.npu.graph_task_update_end(update_stream)
+                    event.record(update_stream)
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
         if flashcomm2_oshard_manager.flashcomm2_oshard_enable():

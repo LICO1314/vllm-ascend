@@ -291,6 +291,74 @@ class AscendMlaCPImpl(AscendMLAImpl):
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.dcp_group = get_dcp_group().device_group if self.dcp_size > 1 else None
 
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config=None,
+        speculative_config=None,
+        num_dcp_pcp_tokens=None,
+    ):
+        if forward_context.is_draft_model:
+            graph_params = get_draft_graph_params()
+        else:
+            graph_params = get_graph_params()
+        # FIXME: Behold! We are using a temporary hack here to update the args
+        # for each layer's attention op in the graph.
+        with torch.npu.stream(update_stream):
+            for key, param, handle, event in zip(
+                forward_context.attn_metadata,
+                graph_params.attn_params[num_tokens],
+                graph_params.handles[num_tokens],
+                graph_params.events[num_tokens],
+            ):
+                (
+                    q_nope,
+                    q_pe,
+                    k_nope,
+                    k_pe,
+                    block_table,
+                    seq_len,
+                    num_heads,
+                    scale,
+                    num_kv_heads,
+                    attn_output,
+                    softmax_lse,
+                ) = param
+
+                decode_meta = forward_context.attn_metadata[key].decode
+                seq_len = decode_meta.cp_seq_len
+
+                # For pcp + spec decode, we flatten seq_lens
+                # to avoid irregular attn_mask shape,
+                # so there's no need to divide runtime_shape by spec_multiple
+                pad_length = num_tokens - len(seq_len)
+                pad_tensor = torch.zeros(pad_length, dtype=seq_len.dtype, device=seq_len.device)
+                seq_len = torch.cat([seq_len, pad_tensor], dim=0)
+
+                torch.npu.graph_task_update_begin(update_stream, handle)
+
+                torch_npu.atb.npu_multi_head_latent_attention(
+                    q_nope,
+                    q_pe,
+                    k_nope,
+                    k_pe,
+                    block_table,
+                    seq_len,
+                    num_heads,
+                    scale,
+                    num_kv_heads,
+                    return_lse=True,
+                    calc_type="calc_type_ring",
+                    workspace=graph_params.workspaces.get(num_tokens),
+                    output=attn_output,
+                    lse=softmax_lse,
+                )
+                torch.npu.graph_task_update_end(update_stream)
+
+                event.record(update_stream)
+
     def get_num_actual_tokens(self, attn_metadata: M):
         if self.pcp_size > 1:
             return attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size

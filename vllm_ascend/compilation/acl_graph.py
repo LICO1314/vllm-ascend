@@ -211,15 +211,35 @@ def update_full_graph_params(
     speculative_config=None,
     num_dcp_pcp_tokens=None,
 ):
+    if forward_context.is_draft_model:
+        graph_params = get_draft_graph_params()
+    else:
+        graph_params = get_graph_params()
+
     impl_cls = attn_backend.get_impl_cls()
-    impl_cls.update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config,
-        speculative_config,
-        num_dcp_pcp_tokens,
-    )
+
+    with torch.npu.stream(update_stream):
+        for key, param, handle, event in zip(
+            forward_context.attn_metadata,
+            graph_params.attn_params[num_tokens],
+            graph_params.handles[num_tokens],
+            graph_params.events[num_tokens],
+        ):
+            torch.npu.graph_task_update_begin(update_stream, handle)
+
+            impl_cls._update_single_layer_params(
+                param=param,
+                attn_metadata=forward_context.attn_metadata[key],
+                num_tokens=num_tokens,
+                vllm_config=vllm_config,
+                speculative_config=speculative_config,
+                graph_params=graph_params,
+                forward_context=forward_context,
+            )
+
+            torch.npu.graph_task_update_end(update_stream)
+
+            event.record(update_stream)
 
 
 @dataclass

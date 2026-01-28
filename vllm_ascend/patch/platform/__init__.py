@@ -28,10 +28,14 @@ from vllm_ascend import envs
 from vllm_ascend.utils import vllm_version_is
 
 USE_MULTI_BLOCK_POOL = False
+ENABLE_PATCH_VLLM_CONFIG = os.getenv("VLLM_ASCEND_PATCH_VLLM_CONFIG",
+                                     "false").lower() in ("true", "1")
 
 if USE_MULTI_BLOCK_POOL:
     import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
     import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
+    import vllm_ascend.patch.platform.patch_vllm_config  # noqa
+elif ENABLE_PATCH_VLLM_CONFIG:
     import vllm_ascend.patch.platform.patch_vllm_config  # noqa
 
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(

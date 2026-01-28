@@ -1171,11 +1171,20 @@ class NPUModelRunner(GPUModelRunner):
                                              intermediate_tensors,
                                              inputs_embeds, model_kwargs):
         assert self.model is not None
+        if isinstance(inputs_embeds, torch.Tensor):
+            _debug_print_nonfinite("inputs_embeds", inputs_embeds)
         hidden_states = self.model(input_ids=input_ids,
                                    positions=positions,
                                    intermediate_tensors=intermediate_tensors,
                                    inputs_embeds=inputs_embeds,
                                    **model_kwargs)
+        # Debug non-finite values in model outputs before any further processing.
+        if isinstance(hidden_states, torch.Tensor):
+            _debug_print_nonfinite("hidden_states_raw", hidden_states)
+        elif isinstance(hidden_states, (list, tuple)) and len(hidden_states) > 0:
+            first = hidden_states[0]
+            if isinstance(first, torch.Tensor):
+                _debug_print_nonfinite("hidden_states_raw[0]", first)
 
         forward_context = get_forward_context()
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL \
@@ -1537,6 +1546,8 @@ class NPUModelRunner(GPUModelRunner):
              intermediate_tensors, max_query_len, synced_cudagraph_mode,
              model_kwargs) = (self._prepare_inputs(scheduler_output,
                                                    intermediate_tensors))
+            if isinstance(inputs_embeds, torch.Tensor):
+                _debug_print_nonfinite("inputs_embeds_pre", inputs_embeds)
 
             if self.dynamic_eplb:
                 self.eplb_updator.take_update_info_from_eplb_process()

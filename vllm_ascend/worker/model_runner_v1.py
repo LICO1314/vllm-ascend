@@ -123,6 +123,27 @@ else:
 
 import torch_npu
 
+# Debug helper for NaN/Inf tracing.
+def _debug_print_nonfinite(name: str, tensor: torch.Tensor | None) -> None:
+    if tensor is None or not isinstance(tensor, torch.Tensor):
+        return
+    if torch.isfinite(tensor).all():
+        return
+    with torch.no_grad():
+        t = tensor.detach().float()
+        nan_count = torch.isnan(t).sum().item()
+        inf_count = torch.isinf(t).sum().item()
+        try:
+            t_min = t.min().item()
+            t_max = t.max().item()
+        except RuntimeError:
+            t_min, t_max = float("nan"), float("nan")
+    print(
+        f"[NAN-DEBUG] {name}: shape={tuple(tensor.shape)} "
+        f"nan={nan_count} inf={inf_count} min={t_min} max={t_max}",
+        flush=True,
+    )
+
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
 
@@ -1621,8 +1642,28 @@ class NPUModelRunner(GPUModelRunner):
                         len(hidden_states) == 1 and \
                         isinstance(hidden_states[0], torch.Tensor):
                     hidden_states = hidden_states[0]
+                _debug_print_nonfinite("hidden_states", hidden_states)
                 sample_hidden_states = hidden_states[logits_indices]
+                _debug_print_nonfinite("sample_hidden_states", sample_hidden_states)
+                if not torch.isfinite(sample_hidden_states).all():
+                    logger.warning_once(
+                        "Non-finite values in sample_hidden_states; "
+                        "sanitizing to keep logits stable.",
+                        scope="local",
+                    )
+                    sample_hidden_states = torch.nan_to_num(
+                        sample_hidden_states, nan=0.0, posinf=0.0, neginf=0.0
+                    )
                 logits = self.model.compute_logits(sample_hidden_states)
+                _debug_print_nonfinite("logits", logits)
+                if logits is not None and not torch.isfinite(logits).all():
+                    logger.warning_once(
+                        "Non-finite logits detected; sanitizing before sampling.",
+                        scope="local",
+                    )
+                    logits = torch.nan_to_num(
+                        logits, nan=0.0, posinf=0.0, neginf=0.0
+                    )
             if broadcast_pp_output:
                 model_output_broadcast_data = {
                     "logits": logits.contiguous(),

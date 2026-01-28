@@ -47,6 +47,27 @@ from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                weak_ref_tensors)
 
+# Debug helper for NaN/Inf tracing.
+def _debug_print_nonfinite(name: str, tensor: torch.Tensor | None) -> None:
+    if tensor is None or not isinstance(tensor, torch.Tensor):
+        return
+    if torch.isfinite(tensor).all():
+        return
+    with torch.no_grad():
+        t = tensor.detach().float()
+        nan_count = torch.isnan(t).sum().item()
+        inf_count = torch.isinf(t).sum().item()
+        try:
+            t_min = t.min().item()
+            t_max = t.max().item()
+        except RuntimeError:
+            t_min, t_max = float("nan"), float("nan")
+    print(
+        f"[NAN-DEBUG] {name}: shape={tuple(tensor.shape)} "
+        f"nan={nan_count} inf={inf_count} min={t_min} max={t_max}",
+        flush=True,
+    )
+
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 
@@ -675,6 +696,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
     ):
 
+        _debug_print_nonfinite("attn_key_in", key)
+        _debug_print_nonfinite("attn_value_in", value)
         if len(kv_cache) > 1:
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event = torch.npu.Event()
@@ -762,6 +785,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens = query.shape[0]
         if attn_metadata is None:
             return output.fill_(0)
+        _debug_print_nonfinite("attn_query_in", query)
         if key is not None and value is not None:
             key, value = self.reshape_and_cache(key, value, kv_cache,
                                                 attn_metadata)

@@ -21,6 +21,7 @@ import vllm_ascend.patch.platform.patch_ec_connector  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_lora_model_manager  # noqa
 import vllm_ascend.patch.platform.patch_mamba_config  # noqa
+import vllm_ascend.patch.platform.patch_mooncake_connector  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
 import vllm_ascend.patch.platform.patch_set_cudagraph_sizes  # noqa
 from vllm_ascend import envs

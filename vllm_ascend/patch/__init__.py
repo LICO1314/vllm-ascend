@@ -54,7 +54,19 @@
 #    Future Plan:
 #       Remove this patch when vllm merges the PR.
 #
-# ** 3. File: platform/patch_mamba_config.py**
+# ** 3. File: platform/patch_mooncake_connector.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.kv_transfer.kv_connector.v1.mooncake_connector.MooncakeConnectorWorker.register_kv_caches`
+#    Why:
+#       kv_cache entries can be nested tuples, causing attribute errors.
+#    How：
+#       normalize kv_cache entries before registering shapes and buffers.
+#    Related PR (if no, explain why):
+#       No, local patch for v0.13.0.
+#    Future Plan:
+#       Remove this patch when vLLM handles nested kv_cache entries.
+#
+# ** 4. File: platform/patch_mamba_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
 #    Why:

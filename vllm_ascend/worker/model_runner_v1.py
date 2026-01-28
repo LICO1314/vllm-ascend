@@ -2410,6 +2410,24 @@ class NPUModelRunner(GPUModelRunner):
         logger.info("Starting to load model %s...", self.model_config.model)
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
+            # Fix mismatched model_type for BailingMoeV2 before model init.
+            try:
+                hf_config = self.model_config.hf_config
+                hf_text_config = self.model_config.hf_text_config
+                arches = getattr(hf_config, "architectures", []) or []
+                if ("BailingMoeV2ForCausalLM" in arches
+                        and getattr(hf_config, "model_type", None)
+                        == "bailing_moe"):
+                    print(
+                        "[PATCH] Fixing model_type bailing_moe -> bailing_moe_v2",
+                        flush=True,
+                    )
+                    hf_config.model_type = "bailing_moe_v2"
+                    if hf_text_config is not None:
+                        hf_text_config.model_type = "bailing_moe_v2"
+            except Exception as e:
+                logger.warning(
+                    "Failed to patch bailing_moe_v2 model_type: %s", e)
             self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
                 model_register(self.model, self.model_config)

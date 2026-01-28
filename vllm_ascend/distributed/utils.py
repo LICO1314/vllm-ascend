@@ -120,12 +120,20 @@ def normalize_kv_cache_entry(
     This helper unwraps a single nested container while keeping semantics
     for common shapes like (k, v) or (k, v, dsa).
     """
+    # Unwrap single-element containers to reach the actual entry.
+    while isinstance(kv_cache_entry, (list, tuple)) and len(kv_cache_entry) == 1:
+        kv_cache_entry = kv_cache_entry[0]
+
     if isinstance(kv_cache_entry, torch.Tensor):
         return (kv_cache_entry,)
+
     if isinstance(kv_cache_entry, (list, tuple)):
-        if (len(kv_cache_entry) == 1
-                and isinstance(kv_cache_entry[0], (list, tuple))):
-            kv_cache_entry = kv_cache_entry[0]
-        return tuple(kv_cache_entry)
+        if all(isinstance(x, torch.Tensor) for x in kv_cache_entry):
+            return tuple(kv_cache_entry)
+        # If we still have nested containers, take the first entry.
+        if all(isinstance(x, (list, tuple)) for x in kv_cache_entry):
+            first = kv_cache_entry[0]
+            if all(isinstance(x, torch.Tensor) for x in first):
+                return tuple(first)
     raise TypeError(
         f"Unexpected kv_cache_entry type: {type(kv_cache_entry)}")

@@ -109,3 +109,23 @@ def all_gather_async(input: torch.Tensor,
                                                input,
                                                group=group.device_group,
                                                async_op=async_op)
+
+
+def normalize_kv_cache_entry(
+    kv_cache_entry: object,
+) -> tuple[torch.Tensor, ...]:
+    """Normalize kv_cache entry to a flat tuple of tensors.
+
+    Some paths may wrap kv_cache entries in an extra list/tuple layer.
+    This helper unwraps a single nested container while keeping semantics
+    for common shapes like (k, v) or (k, v, dsa).
+    """
+    if isinstance(kv_cache_entry, torch.Tensor):
+        return (kv_cache_entry,)
+    if isinstance(kv_cache_entry, (list, tuple)):
+        if (len(kv_cache_entry) == 1
+                and isinstance(kv_cache_entry[0], (list, tuple))):
+            kv_cache_entry = kv_cache_entry[0]
+        return tuple(kv_cache_entry)
+    raise TypeError(
+        f"Unexpected kv_cache_entry type: {type(kv_cache_entry)}")

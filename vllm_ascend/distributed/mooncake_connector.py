@@ -42,7 +42,8 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.mooncake_transfer_engine import global_te
-from vllm_ascend.distributed.utils import get_transfer_timeout_value
+from vllm_ascend.distributed.utils import (get_transfer_timeout_value,
+                                           normalize_kv_cache_entry)
 from vllm_ascend.utils import is_vl_model
 
 if TYPE_CHECKING:
@@ -1201,7 +1202,8 @@ class MooncakeConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
 
-        _, first_kv_cache_tuple = next(iter(kv_caches.items()))
+        _, first_kv_cache_entry = next(iter(kv_caches.items()))
+        first_kv_cache_tuple = normalize_kv_cache_entry(first_kv_cache_entry)
         first_kv_cache = first_kv_cache_tuple[0]
 
         # TODO(tms): Find a more robust way to detect and handle MLA
@@ -1258,6 +1260,7 @@ class MooncakeConnectorWorker:
         ptrs = []
         lengths = []
         for cache_or_caches in kv_caches.values():
+            cache_or_caches = normalize_kv_cache_entry(cache_or_caches)
             # Normalize to always be a list of caches
             if self.use_mla:
                 for i, cache in enumerate(cache_or_caches, 0):

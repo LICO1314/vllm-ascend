@@ -22,6 +22,7 @@ from vllm_ascend.distributed.kvpool.config_data import (
 from vllm_ascend.distributed.kvpool.kv_transfer import (
     KVCacheStoreLayerRecvingThread, KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread, KVCacheStoreSendingThread, KVTransferThread)
+from vllm_ascend.distributed.utils import normalize_kv_cache_entry
 
 backend_map: Dict[str, Type[Backend]] = {
     "mooncake": MooncakeBackend,
@@ -149,7 +150,8 @@ class KVPoolWorker:
         self.finished_store_req: set[str] = set()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        _, first_kv_cache_tuple = next(iter(kv_caches.items()))
+        _, first_kv_cache_entry = next(iter(kv_caches.items()))
+        first_kv_cache_tuple = normalize_kv_cache_entry(first_kv_cache_entry)
         first_kv_cache = first_kv_cache_tuple[0]
 
         # TODO(tms): Find a more robust way to detect and handle MLA
@@ -184,6 +186,7 @@ class KVPoolWorker:
         ptrs = []
         lengths = []
         for cache_or_caches in kv_caches.values():
+            cache_or_caches = normalize_kv_cache_entry(cache_or_caches)
             # Normalize to always be a list of caches
             if self.use_mla:
                 for i, cache in enumerate(cache_or_caches, 0):

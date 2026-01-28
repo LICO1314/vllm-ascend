@@ -36,7 +36,8 @@ from vllm_ascend.distributed.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.utils import (align_memory,
                                            get_transfer_timeout_value,
-                                           kv_alltoall_and_rearrange)
+                                           kv_alltoall_and_rearrange,
+                                           normalize_kv_cache_entry)
 from vllm_ascend.utils import npu_stream_switch
 
 if TYPE_CHECKING:
@@ -930,7 +931,8 @@ class MooncakeLayerwiseConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
 
-        _, first_kv_cache_tuple = next(iter(kv_caches.items()))
+        _, first_kv_cache_entry = next(iter(kv_caches.items()))
+        first_kv_cache_tuple = normalize_kv_cache_entry(first_kv_cache_entry)
         first_kv_cache = first_kv_cache_tuple[0]
         self.create_kv_buffer(first_kv_cache)
 
@@ -986,6 +988,7 @@ class MooncakeLayerwiseConnectorWorker:
         ptrs = []
         lengths = []
         for cache_or_caches in kv_caches.values():
+            cache_or_caches = normalize_kv_cache_entry(cache_or_caches)
             # Normalize to always be a list of caches
             if self.use_mla:
                 for i, cache in enumerate(cache_or_caches, 0):

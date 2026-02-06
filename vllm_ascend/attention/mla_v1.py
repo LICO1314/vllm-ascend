@@ -1034,6 +1034,9 @@ class AscendMLAImpl(MLAAttentionImpl):
 
             actual_seq_lengths_kv = prefill_metadata.chunked_context.chunk_actual_seq_lengths_kv_list[i]
 
+            print("=" * 30)
+            print(">>> [MLA prefill] FIA called in _compute_prefill_context (chunk)", i, "<<<")
+            print("=" * 30)
             chunk_out, chunk_lse = torch_npu.npu_fused_infer_attention_score(
                 q_nope,
                 k_nope,
@@ -1138,6 +1141,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths_kv": actual_seq_lengths_kv,
         }
 
+        print("=" * 30)
+        print(">>> [MLA prefill] FIA called in _forward_prefill <<<")
+        print("=" * 30)
         attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score(q_nope, k_nope, value, **common_kwargs)
 
         attn_output, attn_lse = self._compute_prefill_context(

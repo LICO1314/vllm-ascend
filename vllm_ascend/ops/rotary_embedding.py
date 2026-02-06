@@ -85,8 +85,12 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype,
                                device=device)
     elif not is_vl_model(vllm_config) and has_rope(vllm_config):
         rope_dim = model_config.get_head_size()
+        # For models with explicit rotary_dim config (e.g., BailingMoE)
+        rotary_dim_config = getattr(model_config.hf_text_config, "rotary_dim", None)
+        if rotary_dim_config is not None:
+            rope_dim = int(rotary_dim_config)
         # For models using partial rope like Qwen3-Next.
-        if hasattr(model_config.hf_text_config, "partial_rotary_factor"):
+        elif hasattr(model_config.hf_text_config, "partial_rotary_factor"):
             rope_dim = int(rope_dim *
                            model_config.hf_text_config.partial_rotary_factor)
         _cos = torch.ones(1,

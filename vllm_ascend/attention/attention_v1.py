@@ -790,7 +790,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             sparse_mode=3,
         )
 
-        attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+        attn_output = self._forward_fia_slidingwindow(query, attn_metadata, output)
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         output[:num_tokens] = attn_output[:num_tokens]
         return output
 

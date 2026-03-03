@@ -938,6 +938,92 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         return output
 
+    def _quantize_kv_to_int8(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        layer: AttentionLayer,
+        num_actual_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize K/V tensors from float to int8 using static C8 scales."""
+        k_scale = layer.k_cache_scale.data
+        k_offset = layer.k_cache_offset.data
+        v_scale = layer.v_cache_scale.data
+        v_offset = layer.v_cache_offset.data
+
+        actual_key = key[:num_actual_tokens]
+        actual_value = value[:num_actual_tokens]
+
+        k_int8 = torch.clamp(
+            torch.round(actual_key.float() * k_scale + k_offset), -128, 127
+        ).to(torch.int8)
+        v_int8 = torch.clamp(
+            torch.round(actual_value.float() * v_scale + v_offset), -128, 127
+        ).to(torch.int8)
+
+        key_q = torch.zeros_like(key, dtype=torch.int8)
+        value_q = torch.zeros_like(value, dtype=torch.int8)
+        key_q[:num_actual_tokens] = k_int8
+        value_q[:num_actual_tokens] = v_int8
+        return key_q, value_q
+
+    def forward_c8_fused_infer_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        layer: AttentionLayer,
+    ):
+        """FIA path for C8 quantized KV cache using npu_fused_infer_attention_score_v2."""
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
+            key, value, attn_metadata
+        )
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        query = query[:num_tokens]
+
+        if (
+            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+            and self.attn_type != AttentionType.ENCODER_DECODER
+        ):
+            key = key[:num_tokens]
+            value = value[:num_tokens]
+
+        actual_seq_qlen = attn_metadata.actual_seq_lengths_q
+        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            actual_seq_qlen = (
+                torch.tensor(
+                    [1] * len(attn_metadata.seq_lens_list), dtype=torch.int32
+                )
+                .cumsum(dim=0)
+            )
+
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+            query,
+            key,
+            value,
+            num_query_heads=self.num_heads,
+            num_key_value_heads=self.num_kv_heads,
+            input_layout="TND",
+            pre_tokens=SWA_INT_MAX,
+            next_tokens=0,
+            atten_mask=attn_metadata.attn_mask,
+            sparse_mode=3,
+            softmax_scale=self.scale,
+            block_table=block_table,
+            block_size=block_size,
+            actual_seq_qlen=actual_seq_qlen,
+            actual_seq_kvlen=actual_seq_lengths_kv,
+            key_quant_mode=0,
+            value_quant_mode=0,
+            dequant_scale_key=layer.k_cache_scale.data,
+            dequant_scale_value=layer.v_cache_scale.data,
+        )
+        attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+        output[:num_tokens] = attn_output[:num_tokens]
+        return output
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -966,16 +1052,27 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not yet supported for AscendAttentionBackendImpl")
 
-        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
+        c8_enabled = getattr(layer, "c8_kv_cache_enabled", False)
+        if not c8_enabled:
+            assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         num_tokens = query.shape[0]
         if attn_metadata is None:
             return output.fill_(0)
         if key is not None and value is not None:
+            if c8_enabled:
+                key, value = self._quantize_kv_to_int8(
+                    key, value, layer, attn_metadata.num_actual_tokens
+                )
             key, value = self.reshape_and_cache(key, value, kv_cache, attn_metadata)
         # pooling model branch
         if attn_metadata.model_runner_type == "pooling":
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
             output[:num_tokens] = attn_output[:num_tokens]
             return output
-        output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
+        if c8_enabled:
+            output = self.forward_c8_fused_infer_attention(
+                query, key, value, attn_metadata, output, layer
+            )
+        else:
+            output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
         return output

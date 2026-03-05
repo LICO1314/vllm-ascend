@@ -124,7 +124,15 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         if compilation_config.cudagraph_capture_sizes:
             max_num_tokens = compilation_config.max_cudagraph_capture_size
         else:
-            max_num_tokens = min(max_num_reqs * uniform_decode_query_len, 512)
+            # Decode produces at most max_num_reqs * decode_query_len tokens per
+            # step, but prefill can batch up to max_num_batched_tokens at once.
+            # global_bs must cover both cases to avoid buffer overflow in
+            # npu_moe_distribute_dispatch when handling long prefill sequences.
+            decode_max_tokens = max_num_reqs * uniform_decode_query_len
+            prefill_max_tokens = getattr(
+                scheduler_config, "max_num_batched_tokens", decode_max_tokens
+            )
+            max_num_tokens = max(prefill_max_tokens, decode_max_tokens)
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
         self.global_bs = num_tokens_per_tp_rank * self.ep_world_size
 

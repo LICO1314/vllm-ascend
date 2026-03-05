@@ -22,6 +22,7 @@ from typing import ClassVar
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
@@ -938,6 +939,90 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         return output
 
+    def _prepare_c8_scales(self, layer: AttentionLayer,
+                           device: torch.device) -> None:
+        """Lazily reshape, TP-shard, and device-place per-channel C8 scales.
+
+        Per-channel QuaRot scales are saved for all KV heads in the full model
+        (shape: num_kv_heads_global * head_dim).  Under tensor parallelism each
+        worker owns only num_kv_heads_local heads, so we slice the scale to
+        this worker's portion.  Scales are loaded from checkpoint as CPU tensors
+        so we also move them to the target device (NPU) here.  The result is
+        cached on the layer object so this work runs only once per layer.
+        """
+        if hasattr(layer, "_c8_scales_prepared"):
+            return
+
+        def _shard_and_reshape(raw: torch.Tensor) -> torch.Tensor:
+            if raw.numel() == 1:
+                return raw.to(device=device)
+            expected = self.num_kv_heads * self.head_size
+            if raw.numel() != expected:
+                total_kv_heads = raw.numel() // self.head_size
+                tp_rank = get_tensor_model_parallel_rank()
+                raw = raw.view(total_kv_heads, self.head_size)[
+                    tp_rank * self.num_kv_heads:
+                    (tp_rank + 1) * self.num_kv_heads
+                ].contiguous()
+            return raw.view(1, self.num_kv_heads, self.head_size).to(
+                device=device)
+
+        layer._c8_k_scale = _shard_and_reshape(layer.k_cache_scale.data)
+        layer._c8_k_offset = _shard_and_reshape(layer.k_cache_offset.data)
+        layer._c8_v_scale = _shard_and_reshape(layer.v_cache_scale.data)
+        layer._c8_v_offset = _shard_and_reshape(layer.v_cache_offset.data)
+
+        # FIA V2 (key_quant_mode=0) requires a scalar (1-element) dequant_scale.
+        # For per-channel QuaRot scales reduce to per-tensor by taking the mean.
+        layer._c8_k_scale_fia = layer._c8_k_scale.mean().reshape(1)
+        layer._c8_v_scale_fia = layer._c8_v_scale.mean().reshape(1)
+
+        layer._c8_scales_prepared = True
+
+    def _dequant_paged_kv_to_dense(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        block_table: torch.Tensor,
+        seq_lens: list,
+        target_dtype: torch.dtype,
+        layer,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Gather paged INT8 KV blocks and dequantize to target_dtype.
+
+        The current CANN version's FIA V2 does not support paged INT8 KV
+        cache (TransposeKvCacheByBlock fails to initialize for INT8 data).
+        This helper manually gathers the relevant INT8 blocks per sequence
+        and dequantizes them using the per-channel C8 scales so the result
+        can be passed to FIA V2 in dense (non-paged) mode.
+
+        Inverse of _quantize_kv_to_int8 (scale = dequant_scale, small positive):
+            int8  =  round(float / scale + offset)
+            float = (int8  - offset) * scale
+        """
+        block_size = key.shape[1]
+        gathered_key: list[torch.Tensor] = []
+        gathered_val: list[torch.Tensor] = []
+        for i, seq_len in enumerate(seq_lens):
+            num_blocks = (seq_len + block_size - 1) // block_size
+            bids = block_table[i, :num_blocks]
+            k = key[bids].reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
+            v = value[bids].reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
+            gathered_key.append(k)
+            gathered_val.append(v)
+
+        # [total_kv_tokens, num_kv_heads, head_dim] INT8
+        dense_k = torch.cat(gathered_key, dim=0)
+        dense_v = torch.cat(gathered_val, dim=0)
+
+        # scale/offset shape: [1, num_kv_heads, head_dim] float32
+        # scale is the dequantization scale: x = (q - offset) * scale
+        dense_k = ((dense_k.float() - layer._c8_k_offset) *
+                   layer._c8_k_scale).to(target_dtype)
+        dense_v = ((dense_v.float() - layer._c8_v_offset) *
+                   layer._c8_v_scale).to(target_dtype)
+        return dense_k, dense_v
+
     def _quantize_kv_to_int8(
         self,
         key: torch.Tensor,
@@ -946,19 +1031,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_actual_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize K/V tensors from float to int8 using static C8 scales."""
-        k_scale = layer.k_cache_scale.data
-        k_offset = layer.k_cache_offset.data
-        v_scale = layer.v_cache_scale.data
-        v_offset = layer.v_cache_offset.data
+        self._prepare_c8_scales(layer, key.device)
+        k_scale = layer._c8_k_scale
+        k_offset = layer._c8_k_offset
+        v_scale = layer._c8_v_scale
+        v_offset = layer._c8_v_offset
 
         actual_key = key[:num_actual_tokens]
         actual_value = value[:num_actual_tokens]
 
+        # k_scale / v_scale are dequantization scales (small positive, e.g. max/127).
+        # Quantization = multiply by the reciprocal (1 / dequant_scale).
         k_int8 = torch.clamp(
-            torch.round(actual_key.float() * k_scale + k_offset), -128, 127
+            torch.round(actual_key.float() / k_scale + k_offset), -128, 127
         ).to(torch.int8)
         v_int8 = torch.clamp(
-            torch.round(actual_value.float() * v_scale + v_offset), -128, 127
+            torch.round(actual_value.float() / v_scale + v_offset), -128, 127
         ).to(torch.int8)
 
         key_q = torch.zeros_like(key, dtype=torch.int8)
@@ -976,7 +1064,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         layer: AttentionLayer,
     ):
-        """FIA path for C8 quantized KV cache using npu_fused_infer_attention_score_v2."""
+        """FIA path for C8 quantized KV cache using npu_fused_infer_attention_score_v2.
+
+        The paged KV cache holds INT8 data written by _quantize_kv_to_int8.
+        npu_fused_infer_attention_score_v2 with key_quant_mode=0 performs
+        fused INT8 dequantization + attention internally.  The dequant scales
+        are passed as flat 1-D tensors (TP-sharded, on NPU) via _prepare_c8_scales.
+        """
+        # Ensure scales are prepared on the correct device.  _quantize_kv_to_int8
+        # normally does this, but key/value may be None on certain decode steps.
+        self._prepare_c8_scales(layer, query.device)
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata
         )
@@ -989,6 +1086,34 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             key = key[:num_tokens]
             value = value[:num_tokens]
+
+        # The current CANN version does not support INT8 K/V in FIA V2
+        # (TransposeKvCacheByBlock fails for INT8 blockIDs; CheckFAIQKV rejects
+        # mixed dtypes). Dequantize INT8 K/V to float16 before calling FIA V2.
+        if key.dtype == torch.int8:
+            if block_table is not None:
+                # Paged INT8 KV cache: gather blocks then dequantize.
+                if isinstance(actual_seq_lengths_kv, list):
+                    seq_lens = actual_seq_lengths_kv
+                else:
+                    seq_lens = actual_seq_lengths_kv.tolist()
+                key, value = self._dequant_paged_kv_to_dense(
+                    key, value, block_table, seq_lens, query.dtype, layer
+                )
+                block_table = None
+                # Dense mode needs cumulative KV lengths.
+                actual_seq_lengths_kv = torch.tensor(
+                    seq_lens, dtype=torch.int32
+                ).cumsum(dim=0)
+            else:
+                # Non-paged INT8 K/V (e.g. PrefillNoCache): dequantize in-place.
+                # key/value shape: [num_tokens, num_kv_heads, head_size]
+                # _c8_k_scale shape: [1, num_kv_heads, head_size] – broadcasts.
+                # scale is the dequantization scale: x = (q - offset) * scale
+                key = ((key.float() - layer._c8_k_offset) *
+                       layer._c8_k_scale).to(query.dtype)
+                value = ((value.float() - layer._c8_v_offset) *
+                         layer._c8_v_scale).to(query.dtype)
 
         actual_seq_qlen = attn_metadata.actual_seq_lengths_q
         if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
@@ -1015,10 +1140,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_size=block_size,
             actual_seq_qlen=actual_seq_qlen,
             actual_seq_kvlen=actual_seq_lengths_kv,
-            key_quant_mode=0,
-            value_quant_mode=0,
-            dequant_scale_key=layer.k_cache_scale.data,
-            dequant_scale_value=layer.v_cache_scale.data,
         )
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]

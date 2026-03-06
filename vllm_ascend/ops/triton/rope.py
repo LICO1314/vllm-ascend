@@ -240,7 +240,6 @@ def rope_forward_triton(
             IS_NEOX_STYLE=is_neox_style,
             USE_COS_SIN=False,
         )
-    logger.warning("[DBG] RoPE EXIT: tokens=%d", num_tokens)
     else:
         raise ValueError(
             "Currently, rope_forward_triton supports passing:\n"
@@ -248,4 +247,5 @@ def rope_forward_triton(
             "2. cos and sin which are already selected by positions\n"
             "Please check whether you call rope_forward_triton correctly."
         )
+    logger.warning("[DBG] RoPE EXIT: tokens=%d", num_tokens)
     return q, k

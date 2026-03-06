@@ -22,7 +22,8 @@ from typing import ClassVar
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
-from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                               get_tensor_model_parallel_world_size)
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.math_utils import cdiv
@@ -960,9 +961,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if raw.numel() != expected:
                 total_kv_heads = raw.numel() // self.head_size
                 tp_rank = get_tensor_model_parallel_rank()
+                tp_size = get_tensor_model_parallel_world_size()
+                # When tp_size > total_kv_heads the KV heads are replicated
+                # across TP ranks.  Use floor-division to map each tp_rank to
+                # the correct KV-head slice rather than a direct tp_rank*n
+                # offset (which overflows when tp_rank >= total_kv_heads).
+                kv_head_start = tp_rank * total_kv_heads // tp_size
                 raw = raw.view(total_kv_heads, self.head_size)[
-                    tp_rank * self.num_kv_heads:
-                    (tp_rank + 1) * self.num_kv_heads
+                    kv_head_start:kv_head_start + self.num_kv_heads
                 ].contiguous()
             return raw.view(1, self.num_kv_heads, self.head_size).to(
                 device=device)

@@ -1126,6 +1126,10 @@ class NPUModelRunner(GPUModelRunner):
         ):
             scheduler_output = deepcopy(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        logger.warning(
+            "[DBG] execute_model enter: num_tokens=%d",
+            num_scheduled_tokens,
+        )
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.

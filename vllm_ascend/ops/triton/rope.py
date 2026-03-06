@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 import torch
+from vllm.logger import logger
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -174,6 +175,13 @@ def rope_forward_triton(
     # loop (range(pid, num_tokens, n_row) is empty), so this is safe.
     n_row = get_vectorcore_num()
 
+    logger.warning(
+        "[DBG] RoPE ENTER: tokens=%d n_q=%d n_kv=%d hd=%d rope_dim=%d "
+        "pad_q=%d pad_kv=%d pad_rope=%d BLOCK=%d n_row=%d neox=%s",
+        num_tokens, n_q_head, n_kv_head, head_dim, rope_dim,
+        pad_n_q_head, pad_n_kv_head, pad_rope_dim, BLOCK_SIZE,
+        n_row, is_neox_style,
+    )
     if cos_sin_cache is not None and positions is not None:
         assert positions.shape[0] == num_tokens
         _triton_rope[(n_row,)](
@@ -232,6 +240,7 @@ def rope_forward_triton(
             IS_NEOX_STYLE=is_neox_style,
             USE_COS_SIN=False,
         )
+    logger.warning("[DBG] RoPE EXIT: tokens=%d", num_tokens)
     else:
         raise ValueError(
             "Currently, rope_forward_triton supports passing:\n"

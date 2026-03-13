@@ -470,41 +470,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     graph_params.handles[num_tokens],
                     graph_params.events[num_tokens],
                 ):
-                    is_c8 = len(param) == 15
-                    if is_c8:
-                        (
-                            query,
-                            key_cache,
-                            value,
-                            block_tables,
-                            attn_mask,
-                            block_size,
-                            seq_lens,
-                            query_start_loc,
-                            num_kv_heads,
-                            num_heads,
-                            scale,
-                            attn_output,
-                            softmax_lse,
-                            dequant_scale_key,
-                            dequant_scale_value,
-                        ) = param
-                    else:
-                        (
-                            query,
-                            key_cache,
-                            value,
-                            block_tables,
-                            attn_mask,
-                            block_size,
-                            seq_lens,
-                            query_start_loc,
-                            num_kv_heads,
-                            num_heads,
-                            scale,
-                            attn_output,
-                            softmax_lse,
-                        ) = param
+                    (
+                        query,
+                        key_cache,
+                        value,
+                        block_tables,
+                        attn_mask,
+                        block_size,
+                        seq_lens,
+                        query_start_loc,
+                        num_kv_heads,
+                        num_heads,
+                        scale,
+                        attn_output,
+                        softmax_lse,
+                    ) = param
 
                     if forward_context.is_draft_model:
                         draft_step = attn_count // num_layers
@@ -516,46 +496,23 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
-                    if is_c8:
-                        torch_npu.npu_fused_infer_attention_score_v2.out(
-                            query,
-                            key_cache,
-                            value,
-                            num_query_heads=num_heads,
-                            num_key_value_heads=num_kv_heads,
-                            input_layout="TND",
-                            atten_mask=attn_mask,
-                            sparse_mode=3,
-                            softmax_scale=scale,
-                            key_quant_mode=0,
-                            value_quant_mode=0,
-                            dequant_scale_key=dequant_scale_key,
-                            dequant_scale_value=dequant_scale_value,
-                            block_table=block_tables,
-                            block_size=block_size,
-                            actual_seq_kvlen=seq_lens,
-                            actual_seq_qlen=actual_seq_lengths_q,
-                            workspace=graph_params.workspaces.get(num_tokens),
-                            out=[attn_output, softmax_lse],
-                        )
-                    else:
-                        torch_npu.npu_fused_infer_attention_score.out(
-                            query=query,
-                            key=key_cache,
-                            value=value,
-                            block_table=block_tables,
-                            atten_mask=attn_mask,
-                            input_layout="TND",
-                            block_size=block_size,
-                            actual_seq_lengths=actual_seq_lengths_q,
-                            actual_seq_lengths_kv=seq_lens,
-                            num_key_value_heads=num_kv_heads,
-                            num_heads=num_heads,
-                            scale=scale,
-                            sparse_mode=3,
-                            workspace=graph_params.workspaces.get(num_tokens),
-                            out=[attn_output, softmax_lse],
-                        )
+                    torch_npu.npu_fused_infer_attention_score.out(
+                        query=query,
+                        key=key_cache,
+                        value=value,
+                        block_table=block_tables,
+                        atten_mask=attn_mask,
+                        input_layout="TND",
+                        block_size=block_size,
+                        actual_seq_lengths=actual_seq_lengths_q,
+                        actual_seq_lengths_kv=seq_lens,
+                        num_key_value_heads=num_kv_heads,
+                        num_heads=num_heads,
+                        scale=scale,
+                        sparse_mode=3,
+                        workspace=graph_params.workspaces.get(num_tokens),
+                        out=[attn_output, softmax_lse],
+                    )
                     torch.npu.graph_task_update_end(update_stream)
 
                     event.record(update_stream)
@@ -658,99 +615,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         handle = torch.npu.graph_task_group_end(stream)
         graph_params.handles[num_tokens].append(handle)
         return output, num_tokens
-
-    def full_graph_c8_fia(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        block_size: int,
-        block_table: torch.Tensor,
-        actual_seq_lengths_kv,
-        attn_metadata: AscendMetadata,
-        output: torch.Tensor,
-        layer,
-    ) -> torch.Tensor:
-        """C8 full-graph path using FIA V2.out with quant params."""
-        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
-        graph_params = get_graph_params()
-        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
-        stream = torch_npu.npu.current_stream()
-
-        workspace = graph_params.workspaces.get(num_tokens)
-        softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
-        if workspace is None:
-            workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
-                query,
-                key,
-                value,
-                num_query_heads=self.num_heads,
-                num_key_value_heads=self.num_kv_heads,
-                input_layout="TND",
-                atten_mask=attn_metadata.attn_mask,
-                sparse_mode=3,
-                softmax_scale=self.scale,
-                key_quant_mode=0,
-                value_quant_mode=0,
-                dequant_scale_key=layer._c8_k_scale_fia,
-                dequant_scale_value=layer._c8_v_scale_fia,
-                block_table=block_table,
-                block_size=block_size,
-                actual_seq_kvlen=actual_seq_lengths_kv,
-                actual_seq_qlen=actual_seq_lengths_q,
-            )
-            update_graph_params_workspaces(num_tokens, workspace)
-
-        event = torch.npu.ExternalEvent()
-        event.wait(stream)
-        event.reset(stream)
-        graph_params.events[num_tokens].append(event)
-        graph_params.attn_params[num_tokens].append(
-            (
-                weak_ref_tensors(query),
-                weak_ref_tensors(key),
-                weak_ref_tensors(value),
-                weak_ref_tensors(block_table),
-                weak_ref_tensors(attn_metadata.attn_mask),
-                block_size,
-                actual_seq_lengths_kv,
-                actual_seq_lengths_q,
-                self.num_kv_heads,
-                self.num_heads,
-                self.scale,
-                weak_ref_tensors(output),
-                weak_ref_tensors(softmax_lse),
-                layer._c8_k_scale_fia,
-                layer._c8_v_scale_fia,
-            )
-        )
-
-        torch.npu.graph_task_group_begin(stream)
-        torch_npu.npu_fused_infer_attention_score_v2.out(
-            query,
-            key,
-            value,
-            num_query_heads=self.num_heads,
-            num_key_value_heads=self.num_kv_heads,
-            input_layout="TND",
-            atten_mask=attn_metadata.attn_mask,
-            sparse_mode=3,
-            softmax_scale=self.scale,
-            key_quant_mode=0,
-            value_quant_mode=0,
-            dequant_scale_key=layer._c8_k_scale_fia,
-            dequant_scale_value=layer._c8_v_scale_fia,
-            block_table=block_table,
-            block_size=block_size,
-            actual_seq_kvlen=actual_seq_lengths_kv,
-            actual_seq_qlen=actual_seq_lengths_q,
-            workspace=workspace,
-            out=[output, softmax_lse],
-        )
-        output = output.view(num_tokens, self.num_heads, self.head_size)
-        handle = torch.npu.graph_task_group_end(stream)
-        graph_params.handles[num_tokens].append(handle)
-        return output
 
     def full_graph_pa(
         self,
@@ -1219,21 +1083,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata
         )
-        # Try a C8-specific graph path that updates seq-lens via task-group and
-        # uses FIA V2.out quant interface directly on INT8 paged KV.
-        forward_context: ForwardContext = get_forward_context()
-        if getattr(forward_context, "capturing", False):
-            return self.full_graph_c8_fia(
-                query,
-                key,
-                value,
-                block_size,
-                block_table,
-                actual_seq_lengths_kv,
-                attn_metadata,
-                output,
-                layer,
-            )
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
 

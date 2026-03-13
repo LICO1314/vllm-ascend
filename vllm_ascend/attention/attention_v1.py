@@ -379,6 +379,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.sinks = sinks
 
     @staticmethod
+    def _prefix_sum_list(values: list[int]) -> list[int]:
+        total = 0
+        out: list[int] = []
+        for v in values:
+            total += int(v)
+            out.append(total)
+        return out
+
+    @staticmethod
     def update_graph_params(
         update_stream,
         forward_context,
@@ -535,9 +544,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                     v_offset=c8_v_offset,
                                 )
                                 block_table_for_fia = None
-                                actual_seq_kvlen = torch.tensor(
-                                    seq_lens, dtype=torch.int32, device=query.device
-                                ).cumsum(dim=0)
+                                actual_seq_kvlen = AscendAttentionBackendImpl._prefix_sum_list(seq_lens)
                             else:
                                 dense_k = ((key_cache.float() - c8_k_offset) * c8_k_scale).to(query.dtype)
                                 dense_v = ((value.float() - c8_v_offset) * c8_v_scale).to(query.dtype)
@@ -770,9 +777,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 v_offset=layer._c8_v_offset,
             )
             block_table_for_fia = None
-            actual_seq_kvlen = torch.tensor(
-                seq_lens, dtype=torch.int32, device=query.device
-            ).cumsum(dim=0)
+            actual_seq_kvlen = self._prefix_sum_list(seq_lens)
         elif key.dtype == torch.int8:
             dense_k = ((key.float() - layer._c8_k_offset) * layer._c8_k_scale).to(query.dtype)
             dense_v = ((value.float() - layer._c8_v_offset) * layer._c8_v_scale).to(query.dtype)

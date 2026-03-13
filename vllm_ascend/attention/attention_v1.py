@@ -729,7 +729,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         gathered_val: list[torch.Tensor] = []
         for i, seq_len in enumerate(seq_lens):
             num_blocks = (seq_len + block_size - 1) // block_size
-            bids = block_table[i, :num_blocks].to(dtype=torch.int64)
+            bids = block_table[i, :num_blocks]
             k = key_cache.index_select(0, bids).reshape(-1, num_kv_heads, head_size)[:seq_len]
             v = value_cache.index_select(0, bids).reshape(-1, num_kv_heads, head_size)[:seq_len]
             gathered_key.append(k)
@@ -763,6 +763,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             seq_lens = actual_seq_lengths_kv.tolist()
         if key.dtype == torch.int8 and block_table is not None:
+            if block_table.dtype != torch.int64:
+                block_table = block_table.to(dtype=torch.int64)
             dense_k, dense_v = self._dequant_paged_kv_to_dense_with_scales(
                 key_cache=key,
                 value_cache=value,

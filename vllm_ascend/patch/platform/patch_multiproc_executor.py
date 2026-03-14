@@ -1,8 +1,9 @@
-import threading
-import weakref
 from collections import deque
 from collections.abc import Callable
+import logging
 from multiprocessing.synchronize import Lock as LockType
+import threading
+import weakref
 
 import vllm.v1.executor.multiproc_executor
 from vllm import envs
@@ -18,6 +19,31 @@ from vllm.v1.executor.multiproc_executor import (
     WorkerProc,
     set_multiprocessing_worker_envs,
 )
+
+
+class _SuppressVerboseWorkerExceptionFilter(logging.Filter):
+    """Temporarily suppress noisy multiproc worker traceback log spam.
+
+    Keep functional behavior unchanged: worker failures are still propagated to
+    EngineCore/APIServer. This only drops the ultra-verbose logger.exception
+    record emitted in worker_busy_loop.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "vllm.v1.executor.multiproc_executor":
+            return True
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        return "WorkerProc hit an exception." not in msg
+
+
+def _apply_multiproc_log_filter_once() -> None:
+    logger = logging.getLogger("vllm.v1.executor.multiproc_executor")
+    if any(isinstance(f, _SuppressVerboseWorkerExceptionFilter) for f in logger.filters):
+        return
+    logger.addFilter(_SuppressVerboseWorkerExceptionFilter())
 
 
 class AscendMultiprocExecutor(MultiprocExecutor):
@@ -193,3 +219,4 @@ class AscendWorkerProc(WorkerProc):
 
 
 vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor
+_apply_multiproc_log_filter_once()

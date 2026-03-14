@@ -1358,7 +1358,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key, value, attn_metadata
         )
         forward_context: ForwardContext = get_forward_context()
-        if getattr(forward_context, "capturing", False):
+        parallel_cfg = self.vllm_config.parallel_config
+        nnodes_within_dp = getattr(parallel_cfg, "nnodes_within_dp", 1)
+        dp_size = getattr(parallel_cfg, "data_parallel_size", 1)
+        dp_size_local = getattr(parallel_cfg, "data_parallel_size_local", 0)
+        is_multinode_dp = (nnodes_within_dp > 1) or (
+            dp_size_local > 0 and dp_size > dp_size_local
+        )
+        # Multi-node C8 graph-update path is still unstable (index_select/cat on
+        # paged INT8 KV during graph_task_update may fail with 507000/507009).
+        # Keep C8 in eager attention path to prioritize serving stability.
+        if getattr(forward_context, "capturing", False) and not is_multinode_dp:
             return self.full_graph_c8_fia(
                 query,
                 key,

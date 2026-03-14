@@ -442,6 +442,19 @@ class NPUWorker(WorkerBase):
         # Note: need to adapt for graph mode.
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
         capture_fallback_triggered = False
+        # In multi-node C8 decode, graph warmup/capture can diverge across ranks
+        # and deadlock at distributed readiness barriers. Start in eager to keep
+        # all ranks on a consistent startup path first.
+        model_id = str(getattr(self.model_config, "model", "")).lower()
+        is_multinode_dp = getattr(self.vllm_config.parallel_config, "nnodes_within_dp", 1) > 1
+        is_c8_quarot_model = ("c8" in model_id) or ("quarot" in model_id)
+        if not self.model_config.enforce_eager and is_multinode_dp and is_c8_quarot_model:
+            logger.warning(
+                "Disable graph capture warmup for multi-node C8/QuaRot startup "
+                "to avoid DP coordinator deadlock; forcing eager mode."
+            )
+            self.model_config.enforce_eager = True
+            capture_fallback_triggered = True
         if not self.model_config.enforce_eager:
             cg_capture_sizes: list[int] = []
             if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:

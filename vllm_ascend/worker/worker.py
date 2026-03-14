@@ -445,13 +445,24 @@ class NPUWorker(WorkerBase):
         # In multi-node C8 decode, graph warmup/capture can diverge across ranks
         # and deadlock at distributed readiness barriers. Start in eager to keep
         # all ranks on a consistent startup path first.
-        model_id = str(getattr(self.model_config, "model", "")).lower()
-        is_multinode_dp = getattr(self.vllm_config.parallel_config, "nnodes_within_dp", 1) > 1
-        is_c8_quarot_model = ("c8" in model_id) or ("quarot" in model_id)
-        if not self.model_config.enforce_eager and is_multinode_dp and is_c8_quarot_model:
+        parallel_cfg = self.vllm_config.parallel_config
+        nnodes_within_dp = getattr(parallel_cfg, "nnodes_within_dp", 1)
+        dp_size = getattr(parallel_cfg, "data_parallel_size", 1)
+        dp_size_local = getattr(parallel_cfg, "data_parallel_size_local", 0)
+        # Be conservative here: in practice some launchers may not populate
+        # nnodes_within_dp correctly, but dp_size > dp_size_local still means
+        # data-parallel workers span multiple nodes.
+        is_multinode_dp = (nnodes_within_dp > 1) or (
+            dp_size_local > 0 and dp_size > dp_size_local
+        )
+        if not self.model_config.enforce_eager and is_multinode_dp:
             logger.warning(
-                "Disable graph capture warmup for multi-node C8/QuaRot startup "
-                "to avoid DP coordinator deadlock; forcing eager mode."
+                "Disable graph capture warmup for multi-node startup "
+                "(dp=%s, dp_local=%s, nnodes_within_dp=%s) to avoid DP "
+                "coordinator deadlock; forcing eager mode.",
+                dp_size,
+                dp_size_local,
+                nnodes_within_dp,
             )
             self.model_config.enforce_eager = True
             capture_fallback_triggered = True

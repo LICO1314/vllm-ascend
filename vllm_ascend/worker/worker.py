@@ -462,7 +462,18 @@ class NPUWorker(WorkerBase):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
         if not self.model_config.enforce_eager:
-            self.model_runner.capture_model()
+            try:
+                self.model_runner.capture_model()
+            except RuntimeError as e:
+                msg = str(e)
+                if "error code is 507015" in msg or "NPU function error: call failed" in msg:
+                    logger.warning(
+                        "ACL graph capture failed with 507015 during warmup, "
+                        "falling back to eager mode for startup stability."
+                    )
+                    self.model_config.enforce_eager = True
+                else:
+                    raise
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
         if get_ascend_device_type() != AscendDeviceType.A5:

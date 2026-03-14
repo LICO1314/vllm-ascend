@@ -746,8 +746,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         for i, seq_len in enumerate(seq_lens):
             num_blocks = (seq_len + block_size - 1) // block_size
             bids = block_table[i, :num_blocks]
-            k = self._gather_cache_blocks(key_cache, bids).reshape(-1, num_kv_heads, head_size)[:seq_len]
-            v = self._gather_cache_blocks(value_cache, bids).reshape(-1, num_kv_heads, head_size)[:seq_len]
+            k = AscendAttentionBackendImpl._gather_cache_blocks(key_cache, bids).reshape(
+                -1, num_kv_heads, head_size
+            )[:seq_len]
+            v = AscendAttentionBackendImpl._gather_cache_blocks(value_cache, bids).reshape(
+                -1, num_kv_heads, head_size
+            )[:seq_len]
             gathered_key.append(k)
             gathered_val.append(v)
 

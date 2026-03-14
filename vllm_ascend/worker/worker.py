@@ -441,6 +441,7 @@ class NPUWorker(WorkerBase):
     def compile_or_warm_up_model(self) -> None:
         # Note: need to adapt for graph mode.
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
+        capture_fallback_triggered = False
         if not self.model_config.enforce_eager:
             cg_capture_sizes: list[int] = []
             if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
@@ -472,11 +473,12 @@ class NPUWorker(WorkerBase):
                         "falling back to eager mode for startup stability."
                     )
                     self.model_config.enforce_eager = True
+                    capture_fallback_triggered = True
                 else:
                     raise
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
-        if get_ascend_device_type() != AscendDeviceType.A5:
+        if not capture_fallback_triggered and get_ascend_device_type() != AscendDeviceType.A5:
             self._warm_up_atb()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

@@ -614,7 +614,30 @@ class NPUWorker(WorkerBase):
         self.model_runner.reset_encoder_cache()
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
+        if getattr(self, "_disable_dummy_batch_after_failure", False):
+            return
+        try:
+            self.model_runner._dummy_run(
+                num_tokens=self.model_runner.decode_token_per_req,
+                uniform_decode=True,
+            )
+        except RuntimeError as e:
+            msg = str(e)
+            if (
+                "Failed to compile" in msg
+                or "internal compiler error" in msg
+                or "launcher_cxx11abi1.cxx" in msg
+                or "error code is 507011" in msg
+                or "AclrtSynchronizeStreamWithTimeout" in msg
+            ):
+                logger.warning(
+                    "execute_dummy_batch failed with known runtime instability "
+                    "(%s); disable subsequent dummy batches to keep serving.",
+                    msg.splitlines()[0],
+                )
+                self._disable_dummy_batch_after_failure = True
+                return
+            raise
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

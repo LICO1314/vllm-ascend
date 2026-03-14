@@ -388,6 +388,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return out
 
     @staticmethod
+    def _gather_cache_blocks(cache: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+        """Gather cache blocks by IDs with a robust fallback path.
+
+        On some CANN/ATB combinations, index_select on INT8 paged KV cache may
+        fail with low-level AICore errors. Fall back to scalar slicing to keep
+        functional correctness.
+        """
+        if block_ids.numel() == 0:
+            return cache[:0]
+        try:
+            return cache.index_select(0, block_ids)
+        except RuntimeError:
+            ids = block_ids.to(device="cpu").tolist()
+            return torch.cat([cache[int(i):int(i) + 1] for i in ids], dim=0)
+
+    @staticmethod
     def update_graph_params(
         update_stream,
         forward_context,
@@ -730,8 +746,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         for i, seq_len in enumerate(seq_lens):
             num_blocks = (seq_len + block_size - 1) // block_size
             bids = block_table[i, :num_blocks]
-            k = key_cache.index_select(0, bids).reshape(-1, num_kv_heads, head_size)[:seq_len]
-            v = value_cache.index_select(0, bids).reshape(-1, num_kv_heads, head_size)[:seq_len]
+            k = self._gather_cache_blocks(key_cache, bids).reshape(-1, num_kv_heads, head_size)[:seq_len]
+            v = self._gather_cache_blocks(value_cache, bids).reshape(-1, num_kv_heads, head_size)[:seq_len]
             gathered_key.append(k)
             gathered_val.append(v)
 
@@ -1256,8 +1272,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         for i, seq_len in enumerate(seq_lens):
             num_blocks = (seq_len + block_size - 1) // block_size
             bids = block_table[i, :num_blocks]
-            k = key.index_select(0, bids).reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
-            v = value.index_select(0, bids).reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
+            k = self._gather_cache_blocks(key, bids).reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
+            v = self._gather_cache_blocks(value, bids).reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
             gathered_key.append(k)
             gathered_val.append(v)
 

@@ -467,10 +467,15 @@ class NPUWorker(WorkerBase):
                 self.model_runner.capture_model()
             except RuntimeError as e:
                 msg = str(e)
-                if "error code is 507015" in msg or "NPU function error: call failed" in msg:
+                if ("error code is 507015" in msg
+                        or "NPU function error: call failed" in msg
+                        or "Failed to compile" in msg
+                        or "internal compiler error" in msg
+                        or "launcher_cxx11abi1.cxx" in msg):
                     logger.warning(
-                        "ACL graph capture failed with 507015 during warmup, "
-                        "falling back to eager mode for startup stability."
+                        "ACL graph capture warmup failed (%s), falling back "
+                        "to eager mode for startup stability.",
+                        msg.splitlines()[0],
                     )
                     self.model_config.enforce_eager = True
                     capture_fallback_triggered = True

@@ -1251,11 +1251,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
             float = (int8  - offset) * scale
         """
         block_size = key.shape[1]
+        if block_table.dtype != torch.int64:
+            block_table = block_table.to(dtype=torch.int64)
         gathered_key: list[torch.Tensor] = []
         gathered_val: list[torch.Tensor] = []
         for i, seq_len in enumerate(seq_lens):
             num_blocks = (seq_len + block_size - 1) // block_size
-            bids = block_table[i, :num_blocks].to(dtype=torch.int64)
+            bids = block_table[i, :num_blocks]
             k = key.index_select(0, bids).reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
             v = value.index_select(0, bids).reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
             gathered_key.append(k)

@@ -397,6 +397,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
         """
         if block_ids.numel() == 0:
             return cache[:0]
+        # During graph capture / warmup, prefer a conservative gather path for
+        # INT8 paged KV to avoid unstable device kernels.
+        if cache.dtype == torch.int8:
+            try:
+                forward_context = get_forward_context()
+                if getattr(forward_context, "capturing", False) or getattr(forward_context, "in_profile_run", False):
+                    ids = block_ids.to(device="cpu").tolist()
+                    return torch.cat([cache[int(i):int(i) + 1] for i in ids], dim=0)
+            except Exception:
+                pass
         try:
             return cache.index_select(0, block_ids)
         except RuntimeError:

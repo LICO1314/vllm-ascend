@@ -442,6 +442,7 @@ class NPUWorker(WorkerBase):
         # Note: need to adapt for graph mode.
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
         capture_fallback_triggered = False
+        self._prepare_c8_scales_eagerly()
         # In multi-node C8 decode, graph warmup/capture can diverge across ranks
         # and deadlock at distributed readiness barriers. Start in eager to keep
         # all ranks on a consistent startup path first.
@@ -512,6 +513,32 @@ class NPUWorker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+
+    def _prepare_c8_scales_eagerly(self) -> None:
+        """Pre-place C8 KV scales on NPU before any graph/captured execution.
+
+        C8 scales are loaded from checkpoint on CPU and lazily moved to NPU in
+        attention forward. If the first move happens in captured stream it may
+        fail with aclrtMemcpy(107030). We force one eager preparation pass here.
+        """
+        model = self.model_runner.get_model()
+        if model is None:
+            return
+
+        target_device = torch.device(f"npu:{self.local_rank}")
+        prepared_layers = 0
+        for module in model.modules():
+            if not getattr(module, "c8_kv_cache_enabled", False):
+                continue
+            impl = getattr(module, "impl", None)
+            prepare_fn = getattr(impl, "_prepare_c8_scales", None)
+            if not callable(prepare_fn):
+                continue
+            prepare_fn(module, target_device)
+            prepared_layers += 1
+
+        if prepared_layers > 0:
+            logger.info("Eagerly prepared C8 scales on NPU for %d attention layers.", prepared_layers)
 
     def _warm_up_atb(self):
         x = torch.rand((2, 4), dtype=torch.float16).npu()

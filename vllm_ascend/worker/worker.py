@@ -617,8 +617,7 @@ class NPUWorker(WorkerBase):
         # Keep dummy-pass semantics for DP coordination, but force eager runtime
         # so this path does not trigger graph/triton compile instability.
         self.model_runner._dummy_run(
-            num_tokens=self.model_runner.decode_token_per_req,
-            uniform_decode=True,
+            num_tokens=1,
             cudagraph_runtime_mode=CUDAGraphMode.NONE,
         )
 

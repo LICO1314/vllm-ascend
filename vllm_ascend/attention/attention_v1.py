@@ -1250,22 +1250,31 @@ class AscendAttentionBackendImpl(AttentionImpl):
             int8  =  round(float / scale + offset)
             float = (int8  - offset) * scale
         """
-        block_size = key.shape[1]
-        if block_table.dtype != torch.int64:
-            block_table = block_table.to(dtype=torch.int64)
-        gathered_key: list[torch.Tensor] = []
-        gathered_val: list[torch.Tensor] = []
-        for i, seq_len in enumerate(seq_lens):
-            num_blocks = (seq_len + block_size - 1) // block_size
-            bids = block_table[i, :num_blocks]
-            k = key.index_select(0, bids).reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
-            v = value.index_select(0, bids).reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
-            gathered_key.append(k)
-            gathered_val.append(v)
-
-        # [total_kv_tokens, num_kv_heads, head_dim] INT8
-        dense_k = torch.cat(gathered_key, dim=0)
-        dense_v = torch.cat(gathered_val, dim=0)
+        # Use paged_cache_load directly to avoid index cast kernels on block IDs.
+        seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int32, device=key.device)
+        num_tokens = int(sum(seq_lens))
+        dense_k = torch.empty(
+            (num_tokens, self.num_kv_heads, self.head_size),
+            dtype=key.dtype,
+            device=key.device,
+        )
+        dense_v = torch.empty(
+            (num_tokens, self.num_kv_heads, self.head_size),
+            dtype=value.dtype,
+            device=value.device,
+        )
+        seq_starts = torch.zeros_like(seq_lens_tensor)
+        if seq_starts.numel() > 1:
+            seq_starts[1:] = torch.cumsum(seq_lens_tensor, dim=0)[:-1]
+        torch_npu.atb.npu_paged_cache_load(
+            key,
+            value,
+            block_table,
+            seq_lens_tensor,
+            seq_starts=seq_starts,
+            key=dense_k,
+            value=dense_v,
+        )
 
         # scale/offset shape: [1, num_kv_heads, head_dim] float32
         # scale is the dequantization scale: x = (q - offset) * scale

@@ -1093,7 +1093,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     key, value, block_table, seq_lens, query.dtype, layer
                 )
                 block_table = None
-                block_size = None
+                block_size = 0
                 actual_seq_lengths_kv = torch.tensor(
                     seq_lens, dtype=torch.int32
                 ).cumsum(dim=0)

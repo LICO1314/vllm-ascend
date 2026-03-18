@@ -1060,7 +1060,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata
         )
-        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+
+        # Compute actual_seq_qlen FIRST so that num_tokens is always derived
+        # from it, guaranteeing queryT == actual_seq_qlen[-1] for FIA V2.
+        # (If they are computed from different sources - actual_seq_lengths_q
+        # vs len(seq_lens_list) - a shape mismatch causes CANN error 561002.)
+        actual_seq_qlen = attn_metadata.actual_seq_lengths_q
+        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            actual_seq_qlen = (
+                torch.tensor(
+                    [1] * len(attn_metadata.seq_lens_list), dtype=torch.int32
+                )
+                .cumsum(dim=0)
+            )
+        num_tokens = int(actual_seq_qlen[-1])
         query = query[:num_tokens]
 
         if (
@@ -1080,6 +1093,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     key, value, block_table, seq_lens, query.dtype, layer
                 )
                 block_table = None
+                block_size = None
                 actual_seq_lengths_kv = torch.tensor(
                     seq_lens, dtype=torch.int32
                 ).cumsum(dim=0)
@@ -1088,15 +1102,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                        layer._c8_k_scale).to(query.dtype)
                 value = ((value.float() - layer._c8_v_offset) *
                          layer._c8_v_scale).to(query.dtype)
-
-        actual_seq_qlen = attn_metadata.actual_seq_lengths_q
-        if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-            actual_seq_qlen = (
-                torch.tensor(
-                    [1] * len(attn_metadata.seq_lens_list), dtype=torch.int32
-                )
-                .cumsum(dim=0)
-            )
 
         attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
             query,

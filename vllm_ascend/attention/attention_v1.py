@@ -987,24 +987,37 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather paged INT8 KV blocks and dequantize to target_dtype.
 
-        Inverse of _quantize_kv_to_int8:
-            int8  =  round(float / scale + offset)
-            float = (int8  - offset) * scale
+        Uses a single vectorized gather + masked-select instead of a Python
+        for-loop, eliminating per-batch NPU kernel launches and torch.cat.
+
+        key/value shape: [num_blocks_total, block_size, H]  (H = KV_N * D)
+        block_table:     [batch, max_blocks_per_seq]
         """
+        batch_size = block_table.shape[0]
         block_size = key.shape[1]
-        gathered_key: list[torch.Tensor] = []
-        gathered_val: list[torch.Tensor] = []
-        for i, seq_len in enumerate(seq_lens):
-            num_blocks = (seq_len + block_size - 1) // block_size
-            bids = block_table[i, :num_blocks]
-            k = key[bids].reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
-            v = value[bids].reshape(-1, self.num_kv_heads, self.head_size)[:seq_len]
-            gathered_key.append(k)
-            gathered_val.append(v)
+        H = key.shape[2]
+        max_blocks_per_seq = block_table.shape[1]
+        max_tokens_padded = max_blocks_per_seq * block_size
 
-        dense_k = torch.cat(gathered_key, dim=0)
-        dense_v = torch.cat(gathered_val, dim=0)
+        # 1. Gather all needed blocks at once: [batch*max_blocks, block_size, H]
+        flat_ids = block_table.reshape(-1)
+        gathered_k = key[flat_ids].view(batch_size, max_tokens_padded, H)
+        gathered_v = value[flat_ids].view(batch_size, max_tokens_padded, H)
 
+        # 2. Build valid-token boolean mask without any Python loop.
+        #    valid_mask[i, j] = True iff position j < seq_lens[i].
+        seq_lens_t = torch.tensor(seq_lens, dtype=torch.long, device=key.device)
+        positions = torch.arange(max_tokens_padded, dtype=torch.long,
+                                 device=key.device)
+        valid_mask = (positions.unsqueeze(0) < seq_lens_t.unsqueeze(1)).view(-1)
+
+        # 3. Select valid tokens: [total_tokens, H]
+        dense_k = gathered_k.view(-1, H)[valid_mask]
+        dense_v = gathered_v.view(-1, H)[valid_mask]
+
+        # 4. Reshape to [total_tokens, KV_N, D] and dequantize.
+        dense_k = dense_k.view(-1, self.num_kv_heads, self.head_size)
+        dense_v = dense_v.view(-1, self.num_kv_heads, self.head_size)
         dense_k = ((dense_k.float() - layer._c8_k_offset) *
                    layer._c8_k_scale).to(target_dtype)
         dense_v = ((dense_v.float() - layer._c8_v_offset) *
@@ -1052,75 +1065,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         """FIA path for C8 quantized KV cache.
 
-        Decode path (DecodeOnly): FIA V2 BNSD layout with native paged INT8 KV
-        + perchannel dequant scales.  No Python-loop gather/dequant needed.
-
-        Prefill path: INT8 KV is dense (not paged), dequantize inline before
-        passing to TND FIA V2.
-
-        Chunked-prefill / PrefillCacheHit: paged INT8 KV is gathered and
-        dequantized before passing to TND FIA V2 (slower, but this path is
-        less frequent than pure decode).
+        The paged KV cache holds INT8 data.  For the decode path, blocks are
+        gathered with a single vectorized index op (no Python loop) and then
+        dequantized before passing to TND FIA V2.
         """
         self._prepare_c8_scales(layer, query.device)
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata
         )
 
-        # ---------- Fast decode path -------------------------------------------
-        # For DecodeOnly + paged INT8 KV, pass the INT8 cache directly to FIA V2
-        # with perchannel dequant scales (BNSD layout, Q_S=1).  This eliminates
-        # the costly Python loop + dense gather + dequant in _dequant_paged_kv_to_dense.
-        if (key.dtype == torch.int8
-                and block_table is not None
-                and attn_metadata.attn_state == AscendAttentionState.DecodeOnly):
-            batch_size = len(attn_metadata.seq_lens_list)
-            num_tokens = batch_size  # one new token per request in decode
-
-            # query: [T=batch, N, D] → BNSD [batch, 1, N, D]
-            query_bnsd = query[:num_tokens].view(
-                batch_size, 1, self.num_heads, self.head_size
-            )
-
-            # Per-channel dequant scales must be same dtype as query (bfloat16).
-            # Shape [1, KV_N, D] matches perchannel spec (1, KV_N, D).
-            dequant_scale_k = layer._c8_k_scale.to(query.dtype)
-            dequant_scale_v = layer._c8_v_scale.to(query.dtype)
-
-            seq_lens_list = (
-                attn_metadata.seq_lens_list
-                if isinstance(attn_metadata.seq_lens_list, list)
-                else list(attn_metadata.seq_lens_list)
-            )
-
-            # key/value: [num_blocks, block_size, H] INT8 (paged ND format)
-            attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
-                query_bnsd,
-                key,
-                value,
-                num_query_heads=self.num_heads,
-                num_key_value_heads=self.num_kv_heads,
-                input_layout="BNSD",
-                pre_tokens=SWA_INT_MAX,
-                next_tokens=0,
-                sparse_mode=0,
-                softmax_scale=self.scale,
-                block_table=block_table,
-                block_size=block_size,
-                actual_seq_kvlen=seq_lens_list,
-                dequant_scale_key=dequant_scale_k,
-                dequant_scale_value=dequant_scale_v,
-                key_quant_mode=0,
-                value_quant_mode=0,
-            )
-            # attn_output: [batch, 1, N, D] → [batch, N, D]
-            attn_output = attn_output.view(batch_size, self.num_heads, self.head_size)
-            output[:num_tokens] = attn_output
-            return output
-        # ---------- End fast decode path ----------------------------------------
-
         # Compute actual_seq_qlen FIRST so that num_tokens is always derived
         # from it, guaranteeing queryT == actual_seq_qlen[-1] for FIA V2.
+        # (If they are computed from different sources - actual_seq_lengths_q
+        # vs len(seq_lens_list) - a shape mismatch causes CANN error 561002.)
         actual_seq_qlen = attn_metadata.actual_seq_lengths_q
         if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
             actual_seq_qlen = (
@@ -1141,8 +1098,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         if key.dtype == torch.int8:
             if block_table is not None:
-                # ChunkedPrefill / PrefillCacheHit: gather paged INT8 KV into a
-                # dense float tensor, then use TND FIA V2 without page attention.
                 if isinstance(actual_seq_lengths_kv, list):
                     seq_lens = actual_seq_lengths_kv
                 else:
@@ -1156,7 +1111,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     seq_lens, dtype=torch.int32
                 ).cumsum(dim=0)
             else:
-                # PrefillNoCache: dense INT8 KV, dequantize inline.
                 key = ((key.float() - layer._c8_k_offset) *
                        layer._c8_k_scale).to(query.dtype)
                 value = ((value.float() - layer._c8_v_offset) *

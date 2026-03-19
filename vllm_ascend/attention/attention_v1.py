@@ -986,6 +986,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         layer._c8_v_aq_offset = layer._c8_v_offset.to(torch.bfloat16).view(
             bnsd).contiguous()
 
+        layer._c8_k_inv_scale_bf16 = (
+            1.0 / layer._c8_k_scale).to(torch.bfloat16)
+        layer._c8_k_offset_bf16 = layer._c8_k_offset.to(torch.bfloat16)
+        layer._c8_v_inv_scale_bf16 = (
+            1.0 / layer._c8_v_scale).to(torch.bfloat16)
+        layer._c8_v_offset_bf16 = layer._c8_v_offset.to(torch.bfloat16)
+
         layer._c8_scales_prepared = True
 
     def _dequant_paged_kv_to_dense(
@@ -1042,21 +1049,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize K/V tensors from float to int8 using static C8 scales."""
         self._prepare_c8_scales(layer, key.device)
-        k_scale = layer._c8_k_scale
-        k_offset = layer._c8_k_offset
-        v_scale = layer._c8_v_scale
-        v_offset = layer._c8_v_offset
 
         actual_key = key[:num_actual_tokens]
         actual_value = value[:num_actual_tokens]
 
-        qdt = actual_key.dtype
         k_int8 = torch.clamp(
-            torch.round(actual_key / k_scale.to(qdt) + k_offset.to(qdt)),
+            torch.round(
+                actual_key * layer._c8_k_inv_scale_bf16
+                + layer._c8_k_offset_bf16),
             -128, 127,
         ).to(torch.int8)
         v_int8 = torch.clamp(
-            torch.round(actual_value / v_scale.to(qdt) + v_offset.to(qdt)),
+            torch.round(
+                actual_value * layer._c8_v_inv_scale_bf16
+                + layer._c8_v_offset_bf16),
             -128, 127,
         ).to(torch.int8)
 
@@ -1174,8 +1180,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if all_new_prefill and float_key is not None:
                 prefill_k = float_key[num_decode_tokens:num_tokens]
                 prefill_v = float_value[num_decode_tokens:num_tokens]
-                block_table = None
-                block_size_v2 = 0
                 prefill_seq_kvlen = prefill_seq_qlen
             else:
                 num_block, bsz, _, _ = self.key_cache.shape
@@ -1186,27 +1190,23 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 prefill_k, prefill_v = self._dequant_paged_kv_to_dense(
                     paged_k, paged_v, prefill_bt, prefill_sl,
                     query.dtype, layer)
-                block_table = None
-                block_size_v2 = 0
                 prefill_seq_kvlen = torch.tensor(
                     prefill_sl, dtype=torch.int32).cumsum(dim=0)
 
-            attn_out, _ = torch_npu.npu_fused_infer_attention_score_v2(
-                prefill_q,
-                prefill_k,
-                prefill_v,
-                num_query_heads=self.num_heads,
-                num_key_value_heads=self.num_kv_heads,
-                input_layout="TND",
-                pre_tokens=SWA_INT_MAX,
-                next_tokens=0,
+            attn_out, _ = torch_npu.npu_fused_infer_attention_score(
+                query=prefill_q,
+                key=prefill_k,
+                value=prefill_v,
                 atten_mask=attn_metadata.attn_mask,
+                block_table=None,
+                input_layout="TND",
+                block_size=128,
+                actual_seq_lengths=prefill_seq_qlen,
+                actual_seq_lengths_kv=prefill_seq_kvlen,
+                num_key_value_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale=self.scale,
                 sparse_mode=3,
-                softmax_scale=self.scale,
-                block_table=block_table,
-                block_size=block_size_v2,
-                actual_seq_qlen=prefill_seq_qlen,
-                actual_seq_kvlen=prefill_seq_kvlen,
             )
             n_prefill = num_tokens - num_decode_tokens
             attn_out = attn_out.view(
@@ -1255,7 +1255,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     key, value, block_table, seq_lens, query.dtype, layer
                 )
                 block_table = None
-                block_size = 0
+                block_size = 128
                 actual_seq_lengths_kv = torch.tensor(
                     seq_lens, dtype=torch.int32
                 ).cumsum(dim=0)
@@ -1268,22 +1268,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 key = (key.to(qdt) - k_offset) * k_scale
                 value = (value.to(qdt) - v_offset) * v_scale
 
-        attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
-            query,
-            key,
-            value,
-            num_query_heads=self.num_heads,
-            num_key_value_heads=self.num_kv_heads,
-            input_layout="TND",
-            pre_tokens=SWA_INT_MAX,
-            next_tokens=0,
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+            query=query,
+            key=key,
+            value=value,
             atten_mask=attn_metadata.attn_mask,
-            sparse_mode=3,
-            softmax_scale=self.scale,
             block_table=block_table,
+            input_layout="TND",
             block_size=block_size,
-            actual_seq_qlen=actual_seq_qlen,
-            actual_seq_kvlen=actual_seq_lengths_kv,
+            actual_seq_lengths=actual_seq_qlen,
+            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            num_key_value_heads=self.num_kv_heads,
+            num_heads=self.num_heads,
+            scale=self.scale,
+            sparse_mode=3,
         )
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]

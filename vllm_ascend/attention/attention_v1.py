@@ -1104,55 +1104,64 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     seq_lens = actual_seq_lengths_kv.tolist()
 
                 if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                    # Fast path for decode: gather padded blocks to BSND layout,
-                    # dequant INT8 → target_dtype directly (no float32 intermediate),
-                    # then call FIA V2 with BSND + non-cumulative actual_seq_kvlen.
-                    # This avoids masked_select, arange masking, and float32 traffic.
+                    # Native paged INT8 decode fast path via FIA V1.
+                    #
+                    # FIA V1 (npu_fused_infer_attention_score) Q_S=1 + page
+                    # attention + int8 KV + perchannel key/value antiquant is
+                    # supported without NZ format or head-count restrictions
+                    # (those restrictions only appear in the Q_S>1 section of
+                    # the FIA V1/V2 docs).  FIA V2's dequant_scale_key routes
+                    # to the NZ code-path causing "dim of key invalid" errors;
+                    # FIA V1's key_antiquant_scale uses a different internal
+                    # path that works with ND (blocknum, blocksize, H) layout.
+                    #
+                    # This avoids materialising any float KV tensor:
+                    #   FIA V2 gather+dequant path : 3× memory traffic (INT8
+                    #     read, BF16 write, BF16 read by FIA)
+                    #   FIA V1 native path         : 1× memory traffic (INT8
+                    #     read by FIA, dequant done inside the kernel)
                     batch_size = len(seq_lens)
-                    max_blocks_per_seq = block_table.shape[1]
-                    max_tokens_padded = max_blocks_per_seq * block_size
+                    qdt = query.dtype  # bfloat16
 
-                    flat_ids = block_table.reshape(-1)
-                    # [batch, max_tokens_padded, KV_N, D]  (BSND for K/V)
-                    gathered_k = key[flat_ids].view(
-                        batch_size, max_tokens_padded,
-                        self.num_kv_heads, self.head_size
+                    # Perchannel antiquant scale/offset: (1, KV_N, 1, D) for
+                    # BNSD layout (FIA V1 doc Q_S=1 table, perchannel mode).
+                    k_aq_scale = layer._c8_k_scale.to(qdt).view(
+                        1, self.num_kv_heads, 1, self.head_size
                     )
-                    gathered_v = value[flat_ids].view(
-                        batch_size, max_tokens_padded,
-                        self.num_kv_heads, self.head_size
+                    k_aq_offset = layer._c8_k_offset.to(qdt).view(
+                        1, self.num_kv_heads, 1, self.head_size
                     )
-
-                    qdt = query.dtype
-                    k_offset = layer._c8_k_offset.to(qdt)
-                    k_scale = layer._c8_k_scale.to(qdt)
-                    v_offset = layer._c8_v_offset.to(qdt)
-                    v_scale = layer._c8_v_scale.to(qdt)
-                    dense_k = (gathered_k.to(qdt) - k_offset) * k_scale
-                    dense_v = (gathered_v.to(qdt) - v_offset) * v_scale
-
-                    # Query: [num_tokens=batch, N, D] → BSND [batch, 1, N, D]
-                    query_bsnd = query.view(
-                        batch_size, 1, self.num_heads, self.head_size
+                    v_aq_scale = layer._c8_v_scale.to(qdt).view(
+                        1, self.num_kv_heads, 1, self.head_size
+                    )
+                    v_aq_offset = layer._c8_v_offset.to(qdt).view(
+                        1, self.num_kv_heads, 1, self.head_size
                     )
 
-                    attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
-                        query_bsnd,
-                        dense_k,
-                        dense_v,
-                        num_query_heads=self.num_heads,
+                    # Query: [batch, N, D] → BNSD [batch, N, 1, D]
+                    query_bnsd = query.unsqueeze(2)
+
+                    attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                        query_bnsd,
+                        key,    # paged INT8 (blocknum, blocksize, H)
+                        value,
+                        key_antiquant_scale=k_aq_scale,
+                        key_antiquant_offset=k_aq_offset,
+                        value_antiquant_scale=v_aq_scale,
+                        value_antiquant_offset=v_aq_offset,
+                        block_table=block_table,
+                        actual_seq_lengths_kv=seq_lens,
+                        num_heads=self.num_heads,
                         num_key_value_heads=self.num_kv_heads,
-                        input_layout="BSND",
-                        pre_tokens=SWA_INT_MAX,
-                        next_tokens=0,
+                        input_layout="BNSD",
+                        scale=self.scale,
+                        block_size=block_size,
+                        key_antiquant_mode=0,    # perchannel
+                        value_antiquant_mode=0,
                         sparse_mode=0,
-                        softmax_scale=self.scale,
-                        actual_seq_kvlen=seq_lens,
                     )
-                    # [batch, 1, N, D] → [num_tokens, N, D]
-                    attn_output = attn_output.view(
-                        num_tokens, self.num_heads, self.head_size
-                    )
+                    # [batch, N, 1, D] → [num_tokens, N, D]
+                    attn_output = attn_output.squeeze(2)
                     output[:num_tokens] = attn_output
                     return output
 

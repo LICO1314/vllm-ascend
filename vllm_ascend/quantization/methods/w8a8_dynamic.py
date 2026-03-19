@@ -79,12 +79,10 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
         quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
-        # npu_quant_matmul requires float32 weight_scale when output_dtype is
-        # float16. Use .to(float32) inline to guarantee correct dtype AND device.
         output = torch_npu.npu_quant_matmul(
             quantized_x,
             layer.weight,
-            layer.weight_scale.to(torch.float32),
+            layer.weight_scale,
             pertoken_scale=pertoken_scale,
             bias=bias,
             output_dtype=x.dtype,
@@ -95,7 +93,8 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         # cast quantized weight tensors in NZ format for higher inference speed
         layer.weight.data = maybe_trans_nz(layer.weight.data)
-        layer.weight_scale.data = layer.weight_scale.data.flatten()
+        layer.weight_scale.data = layer.weight_scale.data.flatten().to(
+            torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
 
 

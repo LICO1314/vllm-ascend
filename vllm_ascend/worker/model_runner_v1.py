@@ -297,6 +297,7 @@ class NPUModelRunner(GPUModelRunner):
             0,
             self.dtype,
             None,
+            self.block_size,
             use_mla=self.model_config.use_mla,
             use_sparse=self.use_sparse,
             use_mm_prefix=self.model_config is not None and self.model_config.is_mm_prefix_lm,

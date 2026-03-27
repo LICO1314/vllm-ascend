@@ -1142,14 +1142,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_pe = self.rope_single(q_pe, cos, sin)
 
             if self.enable_dsa_cp:
-                if kv_ag_handle is not None:
-                    kv_ag_handle.wait()
-
                 if self.enable_dsa_cp_with_layer_shard:
                     for layer in self.layer_sharding_kwargs or []:
                         if is_hidden_layer(layer):
                             reach_layer_for_shard_weight_series(layer)
-                elif full_gather_o_proj_enabled:
+
+                if kv_ag_handle is not None:
+                    kv_ag_handle.wait()
+
+                if full_gather_o_proj_enabled and not self.enable_dsa_cp_with_layer_shard:
                     _, o_proj_full_handle = all_gather_async(
                         self.o_proj_tp_weight, get_tp_group(), output=AscendSFAImpl.o_proj_full_pool
                     )

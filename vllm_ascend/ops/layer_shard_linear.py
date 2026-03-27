@@ -262,6 +262,14 @@ def wait_layer_for_shard_weight_series(layer: LinearBase):
     ext.series.wait_weight(ext.layer_idx)
 
 
+def wait_all_pending_shard_weight_broadcasts() -> None:
+    """Wait for all in-flight async shard-weight broadcasts."""
+    for series in _series_dict.values():
+        for window in series.shard_windows:
+            if window.work is not None:
+                window.work.wait()
+
+
 @lru_cache(maxsize=1)
 def get_current_model_num_hidden_layers() -> int:
     from vllm.config import get_current_vllm_config

@@ -431,6 +431,15 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         # Matrix multiply.
         assert self.quant_method is not None
 
+        # Drain in-flight shard_weight_group broadcasts before the tp_group
+        # AllGather + npu_dynamic_quant to avoid concurrent HCCL activity
+        # causing non-deterministic results on Ascend NPU.
+        if enable_dsa_cp_with_layer_shard():
+            from vllm_ascend.ops.layer_shard_linear import wait_all_pending_shard_weight_broadcasts
+
+            wait_all_pending_shard_weight_broadcasts()
+            torch.npu.synchronize()
+
         input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
 

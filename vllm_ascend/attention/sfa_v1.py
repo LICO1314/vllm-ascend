@@ -1089,15 +1089,52 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized"
             q_c = self.q_a_layernorm(q_c)
 
-            k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
+            if self.enable_dsa_cp and attn_metadata.dsa_cp_context is not None:
+                _ctx = attn_metadata.dsa_cp_context
+                # num_tokens_per_device drives the all_gather size and must be uniform
+                # across all TP ranks.
+                _num_cp_tokens = _ctx.local_end_with_pad - _ctx.local_start
+
+                # expected_fc1 is the FC1-local size that DSA CP assumes: each FC1 rank
+                # covers exactly 2 * num_tokens_per_device tokens.  When the global batch
+                # total is not divisible by tp_size, FlashComm1 may produce 1-2 tokens
+                # fewer.  Pad hidden_states (and its projections) to expected_fc1 first so
+                # that the offset calculation below is deterministic.
+                _expected_fc1 = _num_cp_tokens * 2
+                if hidden_states.shape[0] < _expected_fc1:
+                    _pad_fc1 = _expected_fc1 - hidden_states.shape[0]
+                    hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, _pad_fc1))
+                    kv_no_split = nn.functional.pad(kv_no_split, (0, 0, 0, _pad_fc1))
+                    q_c = nn.functional.pad(q_c, (0, 0, 0, _pad_fc1))
+
+                # Use expected_fc1 (not hidden_states.shape[0]) as the modulus so the
+                # offset is always correct regardless of the FlashComm1 rounding.
+                _cp_local_offset = _ctx.local_start % _expected_fc1
+                hidden_states_for_kv = hidden_states[_cp_local_offset : _cp_local_offset + _num_cp_tokens]
+                kv_no_split_for_kv = kv_no_split[_cp_local_offset : _cp_local_offset + _num_cp_tokens]
+                q_c_for_kv = q_c[_cp_local_offset : _cp_local_offset + _num_cp_tokens]
+
+                # build() trims cos/sin to actual_local_tokens for the last rank when the
+                # global total is not divisible by tp_size.  Pad back to _num_cp_tokens
+                # with zeros so all ranks are uniform for the RoPE kernel and all_gather.
+                if cos.shape[0] < _num_cp_tokens:
+                    _pad_cs = _num_cp_tokens - cos.shape[0]
+                    cos = torch.cat([cos, cos.new_zeros(_pad_cs, *cos.shape[1:])], dim=0)
+                    sin = torch.cat([sin, sin.new_zeros(_pad_cs, *sin.shape[1:])], dim=0)
+            else:
+                hidden_states_for_kv = hidden_states
+                kv_no_split_for_kv = kv_no_split
+                q_c_for_kv = q_c
+
+            k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states_for_kv, cos=cos, sin=sin)
 
             wait_for_kv_layer_from_connector(layer_name)
 
             if self.enable_dsa_cp:
                 assert slot_mapping_cp is not None
-                k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping_cp, attn_metadata)
+                k_pe, k_nope = self.exec_kv(kv_no_split_for_kv, cos, sin, kv_cache, slot_mapping_cp, attn_metadata)
             else:
-                k_pe, k_nope = self.exec_kv(kv_no_split, cos, sin, kv_cache, slot_mapping, attn_metadata)
+                k_pe, k_nope = self.exec_kv(kv_no_split_for_kv, cos, sin, kv_cache, slot_mapping, attn_metadata)
 
             if self.enable_dsa_cp:
                 assert k_pe is not None
@@ -1143,7 +1180,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                         async_op=async_op,
                     )
 
-            ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
+            ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c_for_kv)
             q_pe = self.rope_single(q_pe, cos, sin)
 
             if self.enable_dsa_cp:
@@ -1197,8 +1234,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 attn_metadata.reshape_cache_event.record()
 
         topk_indices = self.indexer_select_post_process(
-            x=hidden_states,
-            q_c=q_c,
+            x=hidden_states_for_kv,
+            q_c=q_c_for_kv,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
             cos=cos,
@@ -1234,7 +1271,17 @@ class AscendSFAImpl(MLAAttentionImpl):
                 return result
             attn_output = result
 
-        output[...] = self.o_proj(attn_output)[0]
+        if self.enable_dsa_cp and attn_metadata is not None and attn_metadata.dsa_cp_context is not None:
+            _ctx = attn_metadata.dsa_cp_context
+            _num_cp_tokens = _ctx.local_end_with_pad - _ctx.local_start
+            _expected_fc1 = _num_cp_tokens * 2
+            _cp_local_offset = _ctx.local_start % _expected_fc1
+            _actual_out = min(attn_output.shape[0], output.shape[0] - _cp_local_offset)
+            output[_cp_local_offset : _cp_local_offset + _actual_out] = (
+                self.o_proj(attn_output)[0][:_actual_out]
+            )
+        else:
+            output[...] = self.o_proj(attn_output)[0]
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
